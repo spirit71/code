@@ -8,13 +8,17 @@ from os.path import join
 from datetime import datetime
 from torch.utils.data.dataloader import DataLoader
 torch.backends.cudnn.benchmark= True  # Provides a speedup
-
+from torchinfo import summary
+import torchvision.models as models
 import util
 import test
 import parser
 import commons
 import datasets_ws
-import network
+import network as network
+# import network_dinov2_l as network
+# import network_copy as network
+
 from loss import loss_function
 from dataloaders.GSVCities import get_GSVCities
 
@@ -56,13 +60,19 @@ for name, param in model.module.backbone.named_parameters():
         param.requires_grad = False
 
 # initialize Adapter
-for n, m in model.named_modules():
-    if 'adapter' in n:
-        for n2, m2 in m.named_modules():
-            if 'D_fc2' in n2:
-                if isinstance(m2, nn.Linear):
-                    nn.init.constant_(m2.weight, 0.)
-                    nn.init.constant_(m2.bias, 0.)
+# 定位模型中所有 adapter模块中的 D_fc2线性层。
+
+# 将其权重和偏置强制初始化为 0，通常是为了控制适配器在训练初期的行为（如残差连接的初始无扰动状态）。
+
+# 这是一种​​特定场景下的初始化策略​​，常见于迁移学习或模块化神经网络设计。
+
+for n, m in model.named_modules():# 遍历模型的所有子模块
+    if 'adapter' in n:  # 如果子模块名称包含 'adapter'
+        for n2, m2 in m.named_modules():# 进一步遍历该 adapter 的子模块
+            if 'D_fc2' in n2: # 如果子模块名称包含 'D_fc2'
+                if isinstance(m2, nn.Linear):# 确认该子模块是线性层
+                    nn.init.constant_(m2.weight, 0.)# 权重初始化为0 ，暂时禁用？
+                    nn.init.constant_(m2.bias, 0.)# 偏置初始化为0
 
 #### Setup Optimizer and Loss
 if args.optim == "adam":
@@ -71,11 +81,12 @@ elif args.optim == "sgd":
     optimizer = torch.optim.SGD(model.parameters(), lr=args.lr, momentum=0.9, weight_decay=0.001)
 
 #### Resume model, optimizer, and other training parameters
+# args.resume通常由用户在启动训练脚本时通过命令行参数（例如 --resume）指定，用以指示是否从之前的检查点恢复训练
 if args.resume:
-    model, optimizer, best_r5, start_epoch_num, not_improved_num = util.resume_train(args, model, optimizer)
-    logging.info(f"Resuming from epoch {start_epoch_num} with best recall@5 {best_r5:.1f}")
+    model, optimizer, best_r1, start_epoch_num, not_improved_num = util.resume_train(args, model, optimizer)
+    logging.info(f"Resuming from epoch {start_epoch_num} with best recall@1 {best_r1:.1f}")
 else:
-    best_r5 = start_epoch_num = not_improved_num = 0
+    best_r1 = start_epoch_num = not_improved_num = 0
 
 logging.info(f"Output dimension of the model is {args.features_dim}")
 
@@ -85,7 +96,9 @@ train_dataset = get_GSVCities()
 train_loader_config = {
     'batch_size': args.train_batch_size,
     'num_workers': args.num_workers,
+    #这个参数决定当数据集的大小不能被 batch_size整除时，是否​​丢弃最后一个不完整的批次​​（样本数少于 batch_size）
     'drop_last': False,
+    #设置为 True时，​​可以加速数据从CPU内存到GPU显存的传输​​（因为固定内存允许更快的DMA拷贝），这在利用GPU训练时通常是一个好的实践，能提升训练效率
     'pin_memory': True,
     'shuffle': False}
 
@@ -103,10 +116,10 @@ for epoch_num in range(start_epoch_num, args.epochs_num):
     for images, place_id in tqdm(ds):       
         BS, N, ch, h, w = images.shape
         # reshape places and labels
-        images = images.view(BS*N, ch, h, w)
+        images = images.view(BS*N, ch, h, w) #torch.Size([72, 4, 3, 224, 224]) 
         labels = place_id.view(-1)
 
-        descriptors = model(images.to(args.device))
+        descriptors = model(images.to(args.device))     #backbone返回的x ([288, 4096])
         descriptors = descriptors.cuda()
         loss = loss_function(descriptors, labels) # Call the loss_function we defined above
         del descriptors
@@ -127,40 +140,48 @@ for epoch_num in range(start_epoch_num, args.epochs_num):
     # Compute recalls on validation set
     recalls, recalls_str = test.test(args, val_ds, model)
     logging.info(f"Recalls on val set {val_ds}: {recalls_str}")
-
-    is_best = recalls[1] > best_r5
+    current_r1 = recalls['queries'][0][0]
+    is_best = current_r1 > best_r1
 
     # Save checkpoint, which contains all training parameters
     util.save_checkpoint(args, {"epoch_num": epoch_num, "model_state_dict": model.state_dict(),
-                                "optimizer_state_dict": optimizer.state_dict(), "recalls": recalls, "best_r5": best_r5,
+                                "optimizer_state_dict": optimizer.state_dict(), "recalls": recalls, "best_r1": best_r1,
                                 "not_improved_num": not_improved_num
                                 }, is_best, filename="last_model.pth")
+    # --- 新增：在每个epoch后都保存模型权重 ---
+    # 构建按epoch命名的模型权重文件名，例如 model_epoch_00.pth, model_epoch_01.pth
+    epoch_model_filename = f"model_epoch_{epoch_num:02d}.pth"
+    epoch_model_path = join(args.save_dir, epoch_model_filename)
+    # 只保存模型的 state_dict，文件较小且灵活[1,4](@ref)
+    torch.save(model.state_dict(), epoch_model_path)
+    logging.info(f"Model weights for epoch {epoch_num:02d} saved to {epoch_model_path}")
+    # --- 新增结束 ---
 
     if is_best:
-        logging.info(f"Improved: previous best R@5 = {best_r5:.1f}, current R@5 = {(recalls[1]):.1f}")
-        best_r5 = (recalls[1])
+        logging.info(f"Improved: previous best R@1 = {best_r1:.3f}, current R@1 = {current_r1:.3f}")
+        best_r1 = current_r1
         not_improved_num = 0
     else:
         not_improved_num += 1
         logging.info(
-            f"Not improved: {not_improved_num} / {args.patience}: best R@5 = {best_r5:.1f}, current R@5 = {(recalls[1]):.1f}")
+            f"Not improved: {not_improved_num} / {args.patience}: best R@1 = {best_r1:.3f}, current R@1 = {current_r1:.3f}")
         if not_improved_num >= args.patience:
             logging.info(f"Performance did not improve for {not_improved_num} epochs. Stop training.")
             break
 
-logging.info(f"Best R@5: {best_r5:.1f}")
+logging.info(f"Best R@1: {best_r1:.3f}")
 logging.info(f"Trained for {epoch_num+1:02d} epochs, in total in {str(datetime.now() - start_time)[:-7]}")
 
 #### Test best model on test set
 logging.info("Test *best* model on test set")
-best_model_state_dict = torch.load(join(args.save_dir, "best_model.pth"))["model_state_dict"]
+best_model_state_dict = torch.load(join(args.save_dir, "best_model.pth"), weights_only=False)["model_state_dict"]
 model.load_state_dict(best_model_state_dict)
 recalls, recalls_str = test.test(args, test_ds, model, test_method=args.test_method)
 logging.info(f"Recalls on {test_ds}: {recalls_str}")
 
 #### Test last model on test set
 logging.info("Test *last* model on test set")
-last_model_state_dict = torch.load(join(args.save_dir, "last_model.pth"))["model_state_dict"]
+last_model_state_dict = torch.load(join(args.save_dir, "last_model.pth"), weights_only=False)["model_state_dict"]
 model.load_state_dict(last_model_state_dict)
 recalls, recalls_str = test.test(args, test_ds, model, test_method=args.test_method)
 logging.info(f"Recalls on {test_ds}: {recalls_str}")

@@ -13,7 +13,7 @@ import numpy as np
 from os.path import join
 
 
-def make_deterministic(seed=0):
+def make_deterministic(seed=824):
     """Make results deterministic. If seed == -1, do not make deterministic.
     Running the script in a deterministic way might slow it down.
     """

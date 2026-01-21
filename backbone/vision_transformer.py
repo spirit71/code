@@ -96,10 +96,10 @@ class DinoVisionTransformer(nn.Module):
         self.num_tokens = 1
         self.n_blocks = depth
         self.num_heads = num_heads
-        self.patch_size = patch_size
-        self.num_register_tokens = num_register_tokens
-        self.interpolate_antialias = interpolate_antialias
-        self.interpolate_offset = interpolate_offset
+        self.patch_size = patch_size   #patch_size=14
+        self.num_register_tokens = num_register_tokens #num_register_tokens = 0
+        self.interpolate_antialias = interpolate_antialias #平滑 interpolate_antialias = False
+        self.interpolate_offset = interpolate_offset  #interpolate_offset = 0.1
 
         self.patch_embed = embed_layer(img_size=img_size, patch_size=patch_size, in_chans=in_chans, embed_dim=embed_dim)
         num_patches = self.patch_embed.num_patches
@@ -159,7 +159,7 @@ class DinoVisionTransformer(nn.Module):
         else:
             self.chunked_blocks = False
             self.blocks = nn.ModuleList(blocks_list)
-
+        #相较于dinov2增加部分
         # Parallel Low-rank Adapters
         self.adapters = nn.ModuleList([SideAdapter(D_features=embed_dim, D_hidden_features=4, act_layer=nn.GELU, skip_connect=True, alpha=0.5) for _ in range(depth)])
 
@@ -176,10 +176,10 @@ class DinoVisionTransformer(nn.Module):
             nn.init.normal_(self.register_tokens, std=1e-6)
         named_apply(init_weights_vit_timm, self)
 
-    def interpolate_pos_encoding(self, x, w, h):
+    def interpolate_pos_encoding(self, x, w, h): #相较于许多原始 ViT 实现，更稳健、可泛化到非方形与多尺寸场景
         previous_dtype = x.dtype
         npatch = x.shape[1] - 1
-        N = self.pos_embed.shape[1] - 1
+        N = self.pos_embed.shape[1] - 1         #self.pos_embed.shape  torch.Size([1, 1370, 768])
         if npatch == N and w == h:
             return self.pos_embed
         pos_embed = self.pos_embed.float()
@@ -215,7 +215,7 @@ class DinoVisionTransformer(nn.Module):
         x = self.patch_embed(x)
         if masks is not None:
             x = torch.where(masks.unsqueeze(-1), self.mask_token.to(x.dtype).unsqueeze(0), x)
-
+        #在 token 序列最前面添加 CLS token
         x = torch.cat((self.cls_token.expand(x.shape[0], -1, -1), x), dim=1)
         x = x + self.interpolate_pos_encoding(x, w, h)
 
@@ -250,14 +250,16 @@ class DinoVisionTransformer(nn.Module):
                 }
             )
         return output
-
+#这是一个视觉Transformer类模型的特征前向函数。它接收输入图像tokens（或图像经过patch embedding后的序列）以及可选的 masks，经过一串 Transformer blocks 与并行的低秩适配器 LoPA（Low-rank Parallel Adaptation）后，输出多种规范化后的token切片：CLS token、注册token（register tokens）以及patch tokens，同时还返回若干中间结果，便于下游任务取用。
     def forward_features(self, x, masks=None):
+        # 若 x 是列表，说明可能是多尺度或多视角的输入批，将改走专门处理列表输入的分支 forward_features_list。
         if isinstance(x, list):
             return self.forward_features_list(x, masks)
-
+        #主路径专注于单张量输入
         x = self.prepare_tokens_with_masks(x, masks)
-
+        #复制一份序列到 y。后续将用 y 与主干输出 x 做并行适配器的融合。保持一份“支路”可被 LoPA 修改，而主干 x 继续走标准 Transformer Block。
         y = x.clone()
+        # 并行适配路径：对当前层，先将主干输出 x 与支路 y 做逐元素相加（y + x），再送入对应层的 LoPA 适配器 self.adapters[index]。
         for index, blk in enumerate(self.blocks):
             x = blk(x)
             y = self.adapters[index](y + x)     # LoPA (Low-rank Parallel Adaptation)

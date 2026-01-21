@@ -1,0 +1,29 @@
+cat > .gitignore <<'EOF'
+# --- Logs / outputs ---
+logs/
+log/
+*.log
+runs/
+outputs/
+checkpoints/
+wandb/
+
+# --- Weights / large binaries ---
+*.pth
+*.pt
+*.ckpt
+*.bin
+*.onnx
+*.safetensors
+*.pkl
+*.npz
+*.npy
+
+# --- Python cache ---
+__pycache__/
+*.py[cod]
+
+# --- IDE ---
+.vscode/
+.idea/
+.DS_Store
