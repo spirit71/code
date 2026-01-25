@@ -32,7 +32,7 @@ TRAIN_CITIES = [
 ]
 
 def get_GSVCities():
-    img_per_place=4
+    img_per_place=4   #每个地点（Place ID）=4张图片
     min_img_per_place=4
     image_size=(224,224) #(224, 224)     #image size for GSV-Cities
     cities=TRAIN_CITIES

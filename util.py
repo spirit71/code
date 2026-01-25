@@ -17,7 +17,7 @@ def save_checkpoint(args, state, is_best, filename):
         shutil.copyfile(model_path, join(args.save_dir, "best_model.pth"))
 
 def resume_model(args, model):
-    checkpoint = torch.load(args.resume, map_location=args.device)
+    checkpoint = torch.load(args.resume, map_location=args.device,weights_only=False)
     if 'model_state_dict' in checkpoint:
         state_dict = checkpoint['model_state_dict']
     else:
@@ -31,21 +31,62 @@ def resume_model(args, model):
     model.load_state_dict(state_dict)
     return model
 
+# def resume_train(args, model, optimizer=None, strict=False):
+#     """Load model, optimizer, and other training parameters"""
+#     logging.debug(f"Loading checkpoint: {args.resume}")
+#     checkpoint = torch.load(args.resume,weights_only=False)
+#     start_epoch_num = checkpoint["epoch_num"]+1
+#     model.load_state_dict(checkpoint["model_state_dict"], strict=strict)
+#     if optimizer:
+#         optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+#     best_r1 = checkpoint["best_r1"]
+#     not_improved_num = checkpoint["not_improved_num"]
+#     logging.debug(f"Loaded checkpoint: start_epoch_num = {start_epoch_num}, "
+#                   f"current_best_R@1 = {best_r1:.1f}")
+#     if args.resume.endswith("best_model.pth"):  # Copy best model to current save_dir
+#         shutil.copy(args.resume.replace("best_model.pth", "best_model.pth"), args.save_dir)
+#     return model, optimizer, best_r1, start_epoch_num, not_improved_num
+
 def resume_train(args, model, optimizer=None, strict=False):
     """Load model, optimizer, and other training parameters"""
     logging.debug(f"Loading checkpoint: {args.resume}")
-    checkpoint = torch.load(args.resume)
-    start_epoch_num = checkpoint["epoch_num"]+1
-    model.load_state_dict(checkpoint["model_state_dict"], strict=strict)
-    if optimizer:
-        optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
-    best_r5 = checkpoint["best_r5"]
-    not_improved_num = checkpoint["not_improved_num"]
-    logging.debug(f"Loaded checkpoint: start_epoch_num = {start_epoch_num}, "
-                  f"current_best_R@5 = {best_r5:.1f}")
+    checkpoint = torch.load(args.resume, weights_only=False)
+    
+    # 检查检查点类型
+    if "epoch_num" in checkpoint:
+        # 完整的训练检查点
+        start_epoch_num = checkpoint["epoch_num"] + 1
+        model.load_state_dict(checkpoint["model_state_dict"], strict=strict)
+        if optimizer:
+            optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+        best_r1 = checkpoint["best_r1"]
+        not_improved_num = checkpoint["not_improved_num"]
+        logging.debug(f"Loaded training checkpoint: start_epoch_num = {start_epoch_num}, "
+                      f"current_best_R@1 = {best_r1:.1f}")
+    else:
+        # 只有模型权重的检查点
+        model.load_state_dict(checkpoint, strict=strict)
+        
+        # 从文件名推断epoch号，从下一轮开始
+        import re
+        match = re.search(r'epoch_(\d+)', args.resume)
+        if match:
+            epoch_from_file = int(match.group(1))
+            start_epoch_num = epoch_from_file + 1  # 从下一轮开始
+            best_r1 = 44.677  # 使用之前训练的最佳R@1值
+            not_improved_num = 6
+            logging.debug(f"Loaded model weights from epoch {epoch_from_file}, starting from epoch {start_epoch_num} with best R@1 = {best_r1}")
+        else:
+            # 如果无法从文件名推断，使用默认值
+            start_epoch_num = 38  # 直接从第38轮开始
+            best_r1 =  44.677
+            not_improved_num = 6
+            logging.debug(f"Starting from epoch {start_epoch_num} with best R@1 = {best_r1}")
+    
     if args.resume.endswith("best_model.pth"):  # Copy best model to current save_dir
         shutil.copy(args.resume.replace("best_model.pth", "best_model.pth"), args.save_dir)
-    return model, optimizer, best_r5, start_epoch_num, not_improved_num
+    
+    return model, optimizer, best_r1, start_epoch_num, not_improved_num
 
 
 def compute_pca(args, model, pca_dataset_folder, full_features_dim):

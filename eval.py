@@ -1,7 +1,7 @@
 
 import os
 import torch
-import parser
+import config_parser as parser
 import logging
 from os.path import join
 from datetime import datetime
@@ -11,6 +11,8 @@ import util
 import commons
 import datasets_ws
 import network
+# import network_dinov2_l as network
+# import network_dinov3_b_1 as network
 import warnings
 warnings.filterwarnings("ignore")
 os.environ["CUDA_VISIBLE_DEVICES"] = "0"
@@ -49,7 +51,11 @@ test_ds = datasets_ws.BaseDataset(args, args.eval_datasets_folder, args.eval_dat
 logging.info(f"Test set: {test_ds}")
 
 ######################################### TEST on TEST SET #########################################
-recalls, recalls_str = test.test(args, test_ds, model, args.test_method, pca)
-logging.info(f"Recalls on {test_ds}: {recalls_str}")
+# recalls, recalls_str = test.test(args, test_ds, model, args.test_method, pca)
+# logging.info(f"Recalls on {test_ds}: {recalls_str}")
 
-logging.info(f"Finished in {str(datetime.now() - start_time)[:-7]}")
+# logging.info(f"Finished in {str(datetime.now() - start_time)[:-7]}")
+all_recalls, combined_str = test.test(args, test_ds, model, args.test_method, pca)
+for folder_name, (_, recalls_str) in all_recalls.items():
+    logging.info(f"Recalls on {test_ds.dataset_name}/{folder_name}: {recalls_str}")
+logging.info(f"Combined recalls on {test_ds}: {combined_str}")

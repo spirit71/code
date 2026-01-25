@@ -7,7 +7,11 @@ import torch.nn.functional as F
 from torch.nn import Module,MultiheadAttention,LayerNorm,Dropout
 
 class SA_CA(Module):
-    __constants__ = ['batch_first', 'norm_first']
+    #batch_first控制输入张量的维度顺序，决定 batch_size是否放在第0维。
+    # 如果 batch_first=False，输入形状为 [seq_len, batch_size, dim]
+    #norm_first （归一化顺序）控制 LayerNorm 是在注意力计算前（Pre-LN）还是后（Post-LN）执行。
+    #如果 norm_first=True：先 LayerNorm，再计算注意力（Pre-LN）。
+    __constants__ = ['batch_first', 'norm_first']           
 
     def __init__(self, d_model: int, nhead: int, dropout: float = 0.1,
                  activation: Union[str, Callable[[Tensor], Tensor]] = F.relu,
@@ -39,8 +43,8 @@ class SA_CA(Module):
 
     def forward(
         self,
-        tgt: Tensor,
-        memory: Tensor,
+        tgt: Tensor,        
+        memory: Tensor,     #memory ([288, 257, 768])
         tgt_mask: Optional[Tensor] = None,
         memory_mask: Optional[Tensor] = None,
         tgt_key_padding_mask: Optional[Tensor] = None,
@@ -49,11 +53,12 @@ class SA_CA(Module):
         memory_is_causal: bool = False,
     ) -> Tensor:
 
-        x = tgt
+        x = tgt       #tgt torch.Size([288, 64, 768])
         if self.norm_first:
             x = x + self._sa_block(self.norm1(x), tgt_mask, tgt_key_padding_mask, tgt_is_causal)
             x = x + self._mha_block(self.norm2(x), memory, memory_mask, memory_key_padding_mask, memory_is_causal)
         else:
+            #[batch_size, seq_len, dim]
             x = self.norm1(x + self._sa_block(x, tgt_mask, tgt_key_padding_mask, tgt_is_causal))
             x = self.norm2(x + self._mha_block(x, memory, memory_mask, memory_key_padding_mask, memory_is_causal))
 
