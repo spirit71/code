@@ -12,7 +12,7 @@ import torch
 from torch import Tensor
 from torch import nn
 
-
+#对输入特征按通道维做可学习的逐通道缩放，用于稳定深层 Transformer/ResNet 等残差分支
 class LayerScale(nn.Module):
     def __init__(
         self,

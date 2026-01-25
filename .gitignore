@@ -1,0 +1,29 @@
+# --- Logs / outputs ---
+logs/
+log/
+*.log
+runs/
+outputs/
+checkpoints/
+wandb/
+eval_results/
+
+# --- Weights / large binaries ---
+*.pth
+*.pt
+*.ckpt
+*.bin
+*.onnx
+*.safetensors
+*.pkl
+*.npz
+*.npy
+
+# --- Python cache ---
+__pycache__/
+*.py[cod]
+
+# --- IDE ---
+.vscode/
+.idea/
+.DS_Store

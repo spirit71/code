@@ -1,0 +1,1 @@
+python3 train.py --eval_datasets_folder=/root/data/Pittsburgh250k --eval_dataset_name=pitts30k --foundation_model_path=dinov3_vitb16_pretrain_lvd1689m-73cec8be.pth --epochs_num=100  --patience=100

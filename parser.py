@@ -21,7 +21,7 @@ def parse_arguments():
     parser.add_argument('--pca_dim', type=int, default=None, help="PCA dimension (number of principal components). If None, PCA is not used.")
 
     # Initialization parameters
-    parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--seed", type=int, default=824)
     parser.add_argument("--foundation_model_path", type=str, default=None,
                         help="Path to load foundation model checkpoint.")
     parser.add_argument("--resume", type=str, default=None,
@@ -37,7 +37,7 @@ def parse_arguments():
                         help="only for majority voting, scale factor, the higher it is the more importance is given to agreement")
     parser.add_argument("--val_positive_dist_threshold", type=int, default=25, help="_")
     parser.add_argument("--train_positives_dist_threshold", type=int, default=10, help="_")
-    parser.add_argument('--recall_values', type=int, default=[1, 5, 10, 100], nargs="+",
+    parser.add_argument('--recall_values', type=int, default=[1, 5, 10, 20], nargs="+",
                         help="Recalls to be computed, such as R@5.")
     # Data augmentation parameters
     parser.add_argument("--brightness", type=float, default=None, help="_")
@@ -57,7 +57,6 @@ def parse_arguments():
     parser.add_argument("--save_dir", type=str, default="default",
                         help="Folder name of the current run (saved in ./logs/)")
     args = parser.parse_args()
-    
     if args.eval_datasets_folder == None:
         try:
             args.eval_datasets_folder = os.environ['DATASETS_FOLDER']
@@ -65,9 +64,9 @@ def parse_arguments():
             raise Exception("You should set the parameter --datasets_folder or export " +
                             "the DATASETS_FOLDER environment variable as such \n" +
                             "export DATASETS_FOLDER=../datasets_vg/datasets")
-    
+
     if args.pca_dim != None and args.pca_dataset_folder == None:
         raise ValueError("Please specify --pca_dataset_folder when using pca")
-    
+
     return args
 

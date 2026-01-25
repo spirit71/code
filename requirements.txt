@@ -1,6 +1,6 @@
-pytorch==2.0.0
-pytorch-cuda==11.7
-torchvision==0.15.0
+# pytorch==2.0.0
+# pytorch-cuda==11.7
+# torchvision==0.15.0
 faiss-gpu==1.7.2
 tqdm==4.66.1
 pillow==10.0.1
