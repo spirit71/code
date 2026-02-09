@@ -21,8 +21,8 @@ def parse_arguments():
     parser.add_argument('--pca_dim', type=int, default=None, help="PCA dimension (number of principal components). If None, PCA is not used.")
 
     # Initialization parameters
-    parser.add_argument("--seed", type=int, default=824)
-    parser.add_argument("--foundation_model_path", type=str, default=None,
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--foundation_model_path", type=str, default="./weights/dinov2_vitb14_pretrain.pth",
                         help="Path to load foundation model checkpoint.")
     parser.add_argument("--resume", type=str, default=None,
                         help="Path to load checkpoint from, for resuming training or testing.")
@@ -49,7 +49,7 @@ def parse_arguments():
     parser.add_argument("--random_resized_crop", type=float, default=None, help="_")
     parser.add_argument("--random_rotation", type=float, default=None, help="_")
     # Paths parameters
-    parser.add_argument("--eval_datasets_folder", type=str, default=None, help="Path with all datasets")
+    parser.add_argument("--eval_datasets_folder", type=str, default="/root/data/Pittsburgh", help="Path with all datasets")
     parser.add_argument("--eval_dataset_name", type=str, default="pitts30k", help="Relative path of the dataset")
 
     parser.add_argument("--pca_dataset_folder", type=str, default=None,

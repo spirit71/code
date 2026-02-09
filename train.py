@@ -112,15 +112,31 @@ train_loader_config = {
 #### Training loop
 ds = DataLoader(dataset=train_dataset, **train_loader_config)
 scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=len(ds)*3, gamma=0.7, last_epoch=-1)
+
+# 用于记录统计信息
+global_step = 0
+log_interval = 50  # 每50个batch记录一次统计信息
+
 for epoch_num in range(start_epoch_num, args.epochs_num):
     logging.info(f"Start training epoch: {epoch_num:02d}")
     
     epoch_start_time = datetime.now()
     epoch_losses = np.zeros((0,1), dtype=np.float32)
+    
+    # 用于累积统计信息
+    epoch_stats = {
+        'content_sim_mean': [],
+        'geometry_bias_mean': [],
+        'scale_ratio': [],
+        'attn_entropy': [],
+    }
           
     model = model.train()
+    # 启用统计信息返回（每隔一定batch记录一次）
+    model.module._return_stats = True
+    
     epoch_losses=[]
-    for images, place_id in tqdm(ds):       
+    for batch_idx, (images, place_id) in enumerate(tqdm(ds)):       
         BS, N, ch, h, w = images.shape
         # reshape places and labels
         images = images.view(BS*N, ch, h, w) #torch.Size([72, 4, 3, 224, 224]) 
@@ -129,6 +145,30 @@ for epoch_num in range(start_epoch_num, args.epochs_num):
         descriptors = model(images.to(args.device))     #backbone返回的x ([288, 4096])
         descriptors = descriptors.cuda()
         loss = loss_function(descriptors, labels) # Call the loss_function we defined above
+        
+        # 记录统计信息到TensorBoard
+        if hasattr(model.module, '_decoder_stats') and model.module._decoder_stats is not None:
+            if batch_idx % log_interval == 0:
+                for layer_idx, layer_stats in enumerate(model.module._decoder_stats):
+                    if layer_stats is not None:
+                        # 记录各层统计信息
+                        for key, value in layer_stats.items():
+                            if key != 'layer_idx' and key != 'attn_weights_sample' and isinstance(value, (int, float)):
+                                writer.add_scalar(f'GeometryAttention/Layer{layer_idx}/{key}', value, global_step)
+                                # 累积到epoch统计
+                                if key in epoch_stats:
+                                    epoch_stats[key].append(value)
+                        
+                        # 记录attention权重热力图（每100个batch记录一次）
+                        if batch_idx % (log_interval * 2) == 0 and 'attn_weights_sample' in layer_stats:
+                            attn_weights = layer_stats['attn_weights_sample']
+                            if attn_weights is not None and attn_weights.numel() > 0:
+                                # 转换为numpy并归一化到[0,1]用于可视化
+                                attn_np = attn_weights.numpy()
+                                attn_np = (attn_np - attn_np.min()) / (attn_np.max() - attn_np.min() + 1e-8)
+                                writer.add_image(f'AttentionHeatmap/Layer{layer_idx}', 
+                                               attn_np.reshape(1, *attn_np.shape), global_step, dataformats='CHW')
+        
         del descriptors
 
         optimizer.zero_grad()
@@ -139,17 +179,33 @@ for epoch_num in range(start_epoch_num, args.epochs_num):
         # Keep track of all losses by appending them to epoch_losses
         batch_loss = loss.item()
         epoch_losses = np.append(epoch_losses, batch_loss)
+        
+        # 记录loss和learning rate
+        writer.add_scalar('Train/Loss', batch_loss, global_step)
+        writer.add_scalar('Train/LearningRate', scheduler.get_last_lr()[0], global_step)
+        
+        global_step += 1
         del loss
-    # 记录并分析本轮 alpha 的状态
-    analyze_adapters.analyze_adapters(model, epoch_num, writer=None)
     
     logging.info(f"Finished epoch {epoch_num:02d} in {str(datetime.now() - epoch_start_time)[:-7]}, "
                  f"average epoch triplet loss = {epoch_losses.mean():.4f}")
+    
+    # 记录epoch级别的统计信息
+    writer.add_scalar('Epoch/Loss', epoch_losses.mean(), epoch_num)
+    for key, values in epoch_stats.items():
+        if len(values) > 0:
+            writer.add_scalar(f'Epoch/GeometryAttention/{key}', np.mean(values), epoch_num)
 
     # Compute recalls on validation set
     recalls, recalls_str = test.test(args, val_ds, model)
     logging.info(f"Recalls on val set {val_ds}: {recalls_str}")
     current_r1 = recalls['queries'][0][0]
+    
+    # 记录验证集指标
+    writer.add_scalar('Val/Recall@1', current_r1, epoch_num)
+    if len(recalls['queries']) > 0:
+        for i, r in enumerate(recalls['queries'][0]):
+            writer.add_scalar(f'Val/Recall@{i+1}', r, epoch_num)
     # is_best = recalls[0] > best_r1
     is_best = current_r1 > best_r1
 

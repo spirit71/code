@@ -161,7 +161,7 @@ class DinoVisionTransformer(nn.Module):
             self.blocks = nn.ModuleList(blocks_list)
         #相较于dinov2增加部分
         # Parallel Low-rank Adapters
-        self.adapters = nn.ModuleList([SideAdapter(D_features=embed_dim, D_hidden_features=4, act_layer=nn.GELU, skip_connect=True, init_alpha=1e-3) for _ in range(depth)])
+        self.adapters = nn.ModuleList([SideAdapter(D_features=embed_dim, D_hidden_features=4, act_layer=nn.GELU, skip_connect=True,  alpha=0.5) for _ in range(depth)])
 
         self.norm = norm_layer(embed_dim)
         self.head = nn.Identity()
