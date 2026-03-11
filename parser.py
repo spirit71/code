@@ -51,6 +51,7 @@ def parse_arguments():
     # Paths parameters
     parser.add_argument("--eval_datasets_folder", type=str, default="/root/data/Pittsburgh", help="Path with all datasets")
     parser.add_argument("--eval_dataset_name", type=str, default="pitts30k", help="Relative path of the dataset")
+    parser.add_argument("--geometry_datasets", action="store_true", help="Run error analysis for amstertime/tokyo247/Nordland and save error images + final-layer attention heatmaps")
 
     parser.add_argument("--pca_dataset_folder", type=str, default=None,
                         help="Path with images to be used to compute PCA (ie: pitts30k/images/train")

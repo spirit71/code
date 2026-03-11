@@ -16,10 +16,6 @@ import parser
 import commons
 import datasets_ws
 import network as network
-# import network_dinov2_l as network
-# import network_dinov3_b as network
-# import network_dinov3_b_1 as network
-# import network_dinov3_L  as network
 from scripts import analyze_adapters
 from loss import loss_function
 from dataloaders.GSVCities import get_GSVCities

@@ -120,51 +120,50 @@ def extract_attention_weights(model, images, device, patch_grid_h=16, patch_grid
 
 
 def overlay_attention_on_image(image: np.ndarray, attention_map: np.ndarray, 
-                               alpha: float = 0.5, sigma: float = 5.0):
-    """
-    全图渲染模式 (图2风格)：
-    - 低关注度区域显示蓝色
-    - 高关注度区域显示红色
-    - 保留中等程度的平滑 (sigma=5.0) 以形成光斑
-    """
+                               alpha: float = 0.6, sigma: float = 1.0, threshold: float = 0.1):
     # 1. 基础检查
-    if image.dtype != np.uint8:
-        image = image.astype(np.uint8)
-    
+    if image.dtype != np.uint8: image = image.astype(np.uint8)
     img_h, img_w = image.shape[:2]
     
-    # 2. 尺寸对齐 (使用 Lanczos 保持边缘质量)
-    attention_map = cv2.resize(
-        attention_map.astype(np.float32),
-        (img_w, img_h),
-        interpolation=cv2.INTER_LANCZOS4
-    )
+    # 2. 上采样 (Lanczos)
+    attention_map = cv2.resize(attention_map.astype(np.float32), (img_w, img_h), interpolation=cv2.INTER_LANCZOS4)
     
-    # 3. 中等高斯平滑
-    # sigma=5.0 是关键，能让孤立的像素点变成图2那种“光斑”
+    # 3. 微弱高斯平滑 (消除锯齿，但保留细粒度)
     if sigma > 0:
         attention_map = gaussian_filter(attention_map, sigma=sigma)
-    
-    # 4. 归一化 [0, 255]
+        
+    # 4. 归一化 [0, 1]
     attn_min, attn_max = attention_map.min(), attention_map.max()
     if attn_max > attn_min:
         attention_map_norm = (attention_map - attn_min) / (attn_max - attn_min)
     else:
         attention_map_norm = np.zeros_like(attention_map)
         
+    # 5. 阈值过滤 (低于阈值的完全透明)
+    mask = attention_map_norm.copy()
+    mask[mask < threshold] = 0
+    # 让mask平滑过渡一点点，避免硬边缘
+    mask = mask ** 2  # 伽马校正，让高响应更突出，低响应抑制
+    
+    # 6. 生成热力图颜色
     heatmap_uint8 = (attention_map_norm * 255).astype(np.uint8)
-    
-    # 5. 颜色映射 (JET: 蓝-绿-红)
-    # 这会把 0 值映射为深蓝色，255 映射为红色，形成图2的背景风格
     heatmap_colored = cv2.applyColorMap(heatmap_uint8, cv2.COLORMAP_JET)
-    heatmap_colored = cv2.cvtColor(heatmap_colored, cv2.COLOR_BGR2RGB)
+    heatmap_colored = cv2.cvtColor(heatmap_colored, cv2.COLOR_BGR2RGB) # 转RGB
     
-    # 6. 图像融合
-    # 使用 addWeighted 简单的线性混合
-    # alpha=0.5 表示原图和热力图各占 50%，既能看清纹理，颜色也够重
-    overlaid = cv2.addWeighted(image, 1 - alpha, heatmap_colored, alpha, 0)
+    # 7. 融合：只在mask有值的地方叠加颜色，mask为0的地方保持原图
+    # 公式：Result = Original * (1 - alpha * mask) + Heatmap * (alpha * mask)
     
-    return overlaid
+    image_f = image.astype(np.float32)
+    heatmap_f = heatmap_colored.astype(np.float32)
+    mask_expanded = np.expand_dims(mask, axis=2) # [H, W, 1]
+    
+    # 混合权重
+    blend_factor = mask_expanded * alpha
+    
+    output = image_f * (1.0 - blend_factor) + heatmap_f * blend_factor
+    output = np.clip(output, 0, 255).astype(np.uint8)
+    
+    return output
 
 
 def visualize_stacked_heatmaps(attention_weights_list: List[torch.Tensor],
@@ -232,14 +231,14 @@ def visualize_stacked_heatmaps(attention_weights_list: List[torch.Tensor],
         if not query_attns: continue
         combined_attn = np.mean(query_attns, axis=0)
         # 使用细粒度参数: sigma=1.0, alpha=0.7
-        overlaid_img = overlay_attention_on_image(img_np, combined_attn, alpha=0.5, sigma=5.0)
+        overlaid_img = overlay_attention_on_image(img_np, combined_attn, alpha=0.7, sigma=1.0, threshold=0.1)
         axes[layer_idx + 1].imshow(overlaid_img)
         axes[layer_idx + 1].set_title(f'Layer {layer_idx}', fontsize=11)
         axes[layer_idx + 1].axis('off')
 
     # 最后一列
     if aggregated_attn is not None:
-        overlaid_agg = overlay_attention_on_image(img_np, aggregated_attn, alpha=0.5, sigma=5.0)
+        overlaid_agg = overlay_attention_on_image(img_np, aggregated_attn, alpha=0.7, sigma=1.0, threshold=0.1)
         axes[-1].imshow(overlaid_agg)
         axes[-1].set_title('Aggregated', fontsize=11, fontweight='bold')
         axes[-1].axis('off')
@@ -254,39 +253,44 @@ def visualize_final_layer_heatmap(attention_weights_list: List[torch.Tensor],
                                   save_path: str,
                                   patch_grid_h: int = 16,
                                   patch_grid_w: int = 16,
-                                  alpha: float = 0.5,    # 0.5 颜色够艳
-                                  sigma: float = 5.0):   # 5.0 形成光斑
+                                  alpha: float = 0.6,    # 透明度适中，看清原图
+                                  sigma: float = 1.0,    # 极小的模糊，保留细粒度
+                                  threshold: float = 0.1): # 过滤低关注度背景
     """
-    仅可视化最终层 (图2风格)
+    仅可视化最终层，并确保原图显示自然
     """
     if not attention_weights_list:
         return
 
-    # 1. 获取反标准化后的原图 (保持左侧清晰)
+    # --- 关键修改：获取干净的原始图像 ---
     img_np = get_denormalized_image(image)
+    # --------------------------------
 
+    # 处理 Attention
     attn_weights = attention_weights_list[-1]
-    if attn_weights is None: return
+    if attn_weights is None:
+        return
         
     num_keys = attn_weights.shape[-1]
     if num_keys > patch_grid_h * patch_grid_w:
         attn_weights = attn_weights[:, -patch_grid_h * patch_grid_w:]
     
-    # 平均所有 Query
+    # 计算平均 Attention
     final_attn = attn_weights.mean(dim=0).numpy().reshape(patch_grid_h, patch_grid_w)
     
-    # 2. 调用新的叠加函数 (无需 threshold)
-    overlaid = overlay_attention_on_image(img_np, final_attn, alpha=alpha, sigma=sigma)
+    # 叠加 (使用上一轮提供的 refined overlay 函数)
+    overlaid = overlay_attention_on_image(img_np, final_attn, 
+                                          alpha=alpha, sigma=sigma, threshold=threshold)
 
     # 绘图
-    fig, axes = plt.subplots(1, 2, figsize=(12, 6))
+    fig, axes = plt.subplots(1, 2, figsize=(12, 6)) # 稍微加大画布
     
-    # 左图：原图
+    # 左图：干净的原图
     axes[0].imshow(img_np)
     axes[0].set_title("Original Query Image", fontsize=14)
     axes[0].axis("off")
     
-    # 右图：图2风格热力图 (蓝底红斑)
+    # 右图：叠加热力图
     axes[1].imshow(overlaid)
     axes[1].set_title("Final Layer Attention", fontsize=14)
     axes[1].axis("off")
@@ -642,17 +646,13 @@ def compare_datasets_performance(args, model, dataset_names: List[str],
     return results
 
 
-# Geometry-Constrained-Assignment 分析用：多数据集配置 (domain variants / illumination / Nordland / pitts30k)
+# Geometry-Constrained-Assignment 分析用：三数据集配置 (domain variants / illumination / Nordland)
 # 每项: (显示名/slug, eval_datasets_folder, eval_dataset_name)
 GEOMETRY_DATASET_CONFIGS = [
-    # ("amstertime", "/home/code_qy_7_28/VPR-datasets-downloader/datasets", "amstertime/images"),   # domain variants
-    # ("tokyo247", "/root/data", "Tokyo247/images"),                                                 # illumination changes
-    # ("nordland", "/home/code_qy_7_28/VPR-datasets-downloader/datasets/Nordland", "images_winter_as_quries"),
-    ("pitts30k", "/root/data/Pittsburgh", "pitts30k"),  # Pittsburgh 30k 错误样本与注意力热图分析
+    ("amstertime", "/home/code_qy_7_28/VPR-datasets-downloader/datasets", "amstertime/images"),   # domain variants
+    ("tokyo247", "/root/data", "Tokyo247/images"),                                                 # illumination changes
+    ("nordland", "/home/code_qy_7_28/VPR-datasets-downloader/datasets/Nordland", "images_winter_as_quries"),
 ]
-
-# pitts30k 单独配置，用于在默认流程中增加 Pittsburgh 30k 错误样本分析
-PITTS30K_CONFIG = ("pitts30k", "/root/data/Pittsburgh", "pitts30k")
 
 
 def run_geometry_datasets_error_analysis(
@@ -710,57 +710,7 @@ def run_geometry_datasets_error_analysis(
         if orig_name is not None:
             args.eval_dataset_name = orig_name
 
-    logging.info("多数据集错误样本与注意力热图分析完成。")
-
-
-def run_pitts30k_error_analysis(
-    args,
-    model,
-    config: Optional[Tuple[str, str, str]] = None,
-    num_heatmap_samples: int = 10,
-    num_error_images_max: int = 50,
-):
-    """
-    对 pitts30k 数据集单独运行错误样本分析：检索错误、保存错误图片、生成叠加热力图与最终层注意力热图。
-    可在默认流程（非 --geometry_datasets）中调用，与 amstertime/Nordland 对比分析并列运行。
-    """
-    slug, eval_folder, eval_name = config or PITTS30K_CONFIG
-    logging.info(f"========== pitts30k 错误样本分析: {slug} ({eval_name}) ==========")
-    orig_folder = getattr(args, "eval_datasets_folder", None)
-    orig_name = getattr(args, "eval_dataset_name", None)
-    args.eval_datasets_folder = eval_folder
-    args.eval_dataset_name = eval_name
-    try:
-        test_ds = datasets_ws.BaseDataset(args, eval_folder, eval_name, "test")
-    except Exception as e:
-        logging.warning(f"pitts30k 数据集不可用: {e}")
-        if orig_folder is not None:
-            args.eval_datasets_folder = orig_folder
-        if orig_name is not None:
-            args.eval_dataset_name = orig_name
-        return
-    try:
-        error_samples = analyze_retrieval_errors(
-            args, model, test_ds,
-            save_dir=f"retrieval_errors_{slug}",
-        )
-        save_error_sample_images(
-            test_ds,
-            error_samples,
-            Path(args.save_dir) / f"error_sample_images_{slug}",
-            max_per_folder=num_error_images_max,
-        )
-        visualize_error_samples(
-            args, model, test_ds, error_samples,
-            save_dir=f"error_visualization_{slug}",
-            num_samples=num_heatmap_samples,
-        )
-    finally:
-        if orig_folder is not None:
-            args.eval_datasets_folder = orig_folder
-        if orig_name is not None:
-            args.eval_dataset_name = orig_name
-    logging.info("pitts30k 错误样本与注意力热图分析完成。")
+    logging.info("三数据集错误样本与注意力热图分析完成。")
 
 
 if __name__ == "__main__":
@@ -819,7 +769,7 @@ if __name__ == "__main__":
         args.test_method = "hard_resize"
         logging.info(f"设置 args.test_method = {args.test_method}")
     
-    # 是否运行 Geometry 多数据集（amstertime / tokyo247 / Nordland / pitts30k）错误样本与注意力热图分析
+    # 是否运行 Geometry 三数据集（amstertime / tokyo247 / Nordland）错误样本与注意力热图分析
     if getattr(args, "geometry_datasets", False):
         run_geometry_datasets_error_analysis(
             args, model,
@@ -841,10 +791,3 @@ if __name__ == "__main__":
             results = compare_datasets_performance(args, model, available_datasets)
         else:
             logging.warning("没有可用的数据集。若要运行 amstertime/tokyo247/Nordland 分析，请加参数: --geometry_datasets")
-        # 增加对 pitts30k 数据集的错误样本分析（检索错误、保存错误图片、叠加热力图与最终层注意力热图）
-        run_pitts30k_error_analysis(
-            args, model,
-            config=PITTS30K_CONFIG,
-            num_heatmap_samples=10,
-            num_error_images_max=50,
-        )

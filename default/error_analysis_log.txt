@@ -1,5 +1,21 @@
-2026-02-02 14:00:40,184 [INFO] using MLP layer as FFN
-2026-02-02 14:01:36,912 [INFO] 设置 args.features_dim = 4096
-2026-02-02 14:01:36,913 [WARNING] 数据集 amstertime/images 不可用: Folder /root/data/Pittsburgh/amstertime/images/test does not exist
-2026-02-02 14:01:36,913 [WARNING] 数据集 Nordland/images_winter_as_quries 不可用: Folder /root/data/Pittsburgh/Nordland/images_winter_as_quries/test does not exist
-2026-02-02 14:01:36,913 [WARNING] 没有可用的数据集，请检查数据集路径和名称
+2026-03-06 13:01:20,389 [INFO] using MLP layer as FFN
+2026-03-06 13:02:12,262 [INFO] 设置 args.features_dim = 4096
+2026-03-06 13:02:12,262 [WARNING] 数据集 amstertime/images 不可用: Folder /root/data/Pittsburgh/amstertime/images/test does not exist
+2026-03-06 13:02:12,263 [WARNING] 数据集 Nordland/images_winter_as_quries 不可用: Folder /root/data/Pittsburgh/Nordland/images_winter_as_quries/test does not exist
+2026-03-06 13:02:12,263 [WARNING] 没有可用的数据集。若要运行 amstertime/tokyo247/Nordland 分析，请加参数: --geometry_datasets
+2026-03-06 13:13:13,946 [INFO] using MLP layer as FFN
+2026-03-06 13:13:57,159 [INFO] 设置 args.features_dim = 4096
+2026-03-06 13:13:57,160 [WARNING] 数据集 amstertime/images 不可用: Folder /root/data/Pittsburgh/amstertime/images/test does not exist
+2026-03-06 13:13:57,160 [WARNING] 数据集 Nordland/images_winter_as_quries 不可用: Folder /root/data/Pittsburgh/Nordland/images_winter_as_quries/test does not exist
+2026-03-06 13:13:57,160 [WARNING] 没有可用的数据集。若要运行 amstertime/tokyo247/Nordland 分析，请加参数: --geometry_datasets
+2026-03-06 13:13:57,160 [INFO] ========== pitts30k 错误样本分析: pitts30k (pitts30k) ==========
+2026-03-06 13:13:57,376 [INFO] 开始分析检索错误样本，保存到 default/retrieval_errors_pitts30k
+2026-03-06 14:08:58,032 [INFO] 合并数据库特征...
+2026-03-06 14:08:58,470 [INFO] 分析查询文件夹: queries
+2026-03-06 14:46:29,590 [INFO] 错误样本信息已保存到 default/retrieval_errors_pitts30k/error_samples_info.txt
+2026-03-06 14:46:29,590 [INFO] 总错误样本数: 2286
+2026-03-06 14:46:29,695 [INFO] 错误样本图片已保存到 default/error_sample_images_pitts30k
+2026-03-06 14:46:29,695 [INFO] 开始可视化错误样本，保存到 default/error_visualization_pitts30k
+2026-03-06 14:46:48,986 [INFO] 已可视化 5/10 个错误样本 (queries)
+2026-03-06 14:47:05,421 [INFO] 已可视化 10/10 个错误样本 (queries)
+2026-03-06 14:47:05,421 [INFO] pitts30k 错误样本与注意力热图分析完成。

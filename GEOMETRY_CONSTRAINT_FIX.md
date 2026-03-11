@@ -98,3 +98,41 @@ nn.init.xavier_uniform_(self.query_geometry_proj.weight, gain=0.1)
 1. 几何偏置的尺度是否与内容相似度匹配（应该在相似的数量级）
 2. Attention权重的分布是否合理（不应该过度集中在某些位置）
 3. 验证集和测试集的精度是否提升
+
+## 错误样本与注意力热图分析（amstertime / tokyo247 / Nordland）
+
+当 Geometry-Constrained-Assignment 在 amstertime（domain variants）、tokyo247（illumination）有提升，但在 Nordland 上下降时，可筛选各数据集的错误样本并查看**最终层 queries 的注意力热图**以分析原因。
+
+### 运行方式
+
+```bash
+# 使用默认 checkpoint 与输出目录
+./scripts/run_error_analysis_geometry.sh
+
+# 或指定 checkpoint 与输出目录
+./scripts/run_error_analysis_geometry.sh ./logs/default/2026-01-31_10-39-54/best_model.pth ./logs/geometry_error_analysis
+```
+
+或直接调用（需在项目根目录，且 `PYTHONPATH` 包含项目根）：
+
+```bash
+PYTHONPATH=. python scripts/analyze_errors_attnmap.py --geometry_datasets --resume <checkpoint.pth> --save_dir <输出目录>
+```
+
+### 输出内容
+
+- **error_sample_images_\***：每个数据集的错误样本**查询图片**（按 query 文件夹分子目录），便于人工筛选与对比。
+- **retrieval_errors_\***：各数据集的错误样本索引、预测索引、正样本等统计（`error_samples_info.txt`）。
+- **error_visualization_\***：每个错误样本对应：
+  - `*_stacked.png`：各 decoder 层 + 聚合的叠加热力图；
+  - `*_final_layer_heatmap.png`：**仅最终层** decoder 的 queries 注意力热图，便于分析模型在错误样本上关注的位置。
+
+### 数据集路径配置
+
+脚本内置三数据集路径（可在 `scripts/analyze_errors_attnmap.py` 中修改 `GEOMETRY_DATASET_CONFIGS`）：
+
+| 数据集   | 说明               | 默认 eval_folder / name |
+|----------|--------------------|--------------------------|
+| amstertime | domain variants   | `.../datasets`, `amstertime/images` |
+| tokyo247   | illumination changes | `/root/data`, `Tokyo247/images` |
+| Nordland  | winter as queries | `.../datasets/Nordland`, `images_winter_as_quries` |
