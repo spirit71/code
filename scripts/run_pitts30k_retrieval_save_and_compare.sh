@@ -8,16 +8,19 @@ export PYTHONPATH=.
 
 # ---------- 1) 运行检索并保存 JSON + 错误样本图（默认执行） ----------
 # 保存每个 query 的 top-k 结果到 retrieval_results.json，并保存 top1 错误样本并排图
+
 # python scripts/pitts30k_retrieval_save_and_compare_1.py \
-#   --resume /home/code_qy_7_28/EDTformer/logs/logs/default/2026-01-25_14-18-27_edtf_repro_seed42/2026-01-25_14-18-33/best_model.pth \
-#   --eval_datasets_folder /root/data/Pittsburgh \
-#   --eval_dataset_name pitts30k \
-#   --save_dir ./logs/pitts30k_retrieval_baseline \
+#   --resume /home/code_qy_7_28/EDTformer_test/logs/default/2026-03-10_14-12-23/best_model.pth \
+#   --eval_datasets_folder /home/code_qy_7_28/VPR-datasets-downloader/datasets \
+#   --eval_dataset_name amstertime/images \
+#   --save_dir ./logs/amstertime_retrieval_improved \
 #   --top_k 20 \
 #   --output_json retrieval_results.json \
 #   --save_error_images \
 #   --max_error_images 2000
-# --resume ./logs/default/2026-02-02_13-37-12/best_model.pth \ 
+# --resume ./logs/default/2026-02-02_13-37-12/best_model.pth \   
+
+
 
 # ---------- 2) 改进后再跑一次，保存到另一目录 ----------
 # python scripts/pitts30k_retrieval_save_and_compare.py \
@@ -40,7 +43,13 @@ export PYTHONPATH=.
 #   --comparison_dir ./logs/pitts30k_comparison
 # echo "Done. Check comparison_report.txt and fixed/ still_wrong/ new_wrong/ under comparison_dir."
 
-python scripts/analyze_comparison.py \
-  --baseline /home/code_qy_7_28/EDTformer/logs/pitts30k_retrieval_baseline/retrieval_results.json \
-  --improved ./logs/pitts30k_retrieval_improved_02/retrieval_results.json \
-  --out_dir ./logs/pitts30k_comparison_report
+#amstertime
+python scripts/analyze_comparison_1.py \
+  --baseline /home/code_qy_7_28/EDTformer/logs/amstertime_retrieval_baseline/retrieval_results.json \
+  --improved ./logs/amstertime_retrieval_improved/retrieval_results.json \
+  --out_dir ./logs/amstertime_comparison_report
+#pitts30k
+# python scripts/analyze_comparison_1.py \
+#   --baseline /home/code_qy_7_28/EDTformer/logs/pitts30k_retrieval_baseline/retrieval_results.json \
+#   --improved ./logs/pitts30k_retrieval_improved_02/retrieval_results.json \
+#   --out_dir ./logs/pitts30k_comparison_report
