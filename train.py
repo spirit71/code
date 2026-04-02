@@ -26,6 +26,43 @@ import warnings
 warnings.filterwarnings("ignore")
 import os
 os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+
+import os
+import json
+
+def extract_r_at_k(recalls: dict) -> dict:
+    """
+    Extract R@1/5/10/20 for the 'queries' entry and return Python-float metrics.
+    This avoids JSON serialization issues (e.g., numpy.ndarray).
+    Assumes recalls['queries'][0] is an array-like: [R@1, R@5, R@10, R@20, ...].
+    """
+    q = recalls.get("queries", None)
+    if q is None:
+        return {}
+
+    # q could be list/ndarray; ensure we index safely
+    q0 = q[0]
+
+    def _to_float(x):
+        # numpy scalar / torch scalar / python number -> float
+        try:
+            return float(x)
+        except Exception:
+            # e.g., torch tensor with one element
+            try:
+                return float(x.item())
+            except Exception:
+                return None
+
+    metrics = {}
+    # Index mapping based on typical VPR recalls order: 1, 5, 10, 20
+    if len(q0) > 0: metrics["R@1"]  = _to_float(q0[0])
+    if len(q0) > 1: metrics["R@5"]  = _to_float(q0[1])
+    if len(q0) > 2: metrics["R@10"] = _to_float(q0[2])
+    if len(q0) > 3: metrics["R@20"] = _to_float(q0[3])
+
+    return metrics
+
 #### Initial setup: parser, logging...
 args = parser.parse_arguments()
 start_time = datetime.now()
@@ -137,26 +174,20 @@ for epoch_num in range(start_epoch_num, args.epochs_num):
     logging.info(f"Finished epoch {epoch_num:02d} in {str(datetime.now() - epoch_start_time)[:-7]}, "
                  f"average epoch triplet loss = {epoch_losses.mean():.4f}")
 
-    # Compute recalls on validation set
+        # ===================== Validation =====================
     recalls, recalls_str = test.test(args, val_ds, model)
     logging.info(f"Recalls on val set {val_ds}: {recalls_str}")
-    current_r1 = recalls['queries'][0][0]
+
+    # Extract stable scalar metrics for logging/JSON
+    val_metrics = extract_r_at_k(recalls)
+    current_r1 = val_metrics.get("R@1", None)
+    if current_r1 is None:
+        # fallback (should not happen unless recalls format changed)
+        current_r1 = float(recalls["queries"][0][0])
+
     is_best = current_r1 > best_r1
 
-    # Save checkpoint, which contains all training parameters
-    util.save_checkpoint(args, {"epoch_num": epoch_num, "model_state_dict": model.state_dict(),
-                                "optimizer_state_dict": optimizer.state_dict(), "recalls": recalls, "best_r1": best_r1,
-                                "not_improved_num": not_improved_num
-                                }, is_best, filename="last_model.pth")
-    # --- 新增：在每个epoch后都保存模型权重 ---
-    # 构建按epoch命名的模型权重文件名，例如 model_epoch_00.pth, model_epoch_01.pth
-    epoch_model_filename = f"model_epoch_{epoch_num:02d}.pth"
-    epoch_model_path = join(args.save_dir, epoch_model_filename)
-    # 只保存模型的 state_dict，文件较小且灵活[1,4](@ref)
-    torch.save(model.state_dict(), epoch_model_path)
-    logging.info(f"Model weights for epoch {epoch_num:02d} saved to {epoch_model_path}")
-    # --- 新增结束 ---
-
+    # ===================== Update best & early-stop counter FIRST =====================
     if is_best:
         logging.info(f"Improved: previous best R@1 = {best_r1:.3f}, current R@1 = {current_r1:.3f}")
         best_r1 = current_r1
@@ -164,10 +195,61 @@ for epoch_num in range(start_epoch_num, args.epochs_num):
     else:
         not_improved_num += 1
         logging.info(
-            f"Not improved: {not_improved_num} / {args.patience}: best R@1 = {best_r1:.3f}, current R@1 = {current_r1:.3f}")
-        if not_improved_num >= args.patience:
-            logging.info(f"Performance did not improve for {not_improved_num} epochs. Stop training.")
-            break
+            f"Not improved: {not_improved_num} / {args.patience}: best R@1 = {best_r1:.3f}, current R@1 = {current_r1:.3f}"
+        )
+
+    # ===================== Save checkpoint (now best_r1 is consistent) =====================
+    util.save_checkpoint(
+        args,
+        {
+            "epoch_num": epoch_num,
+            "model_state_dict": model.state_dict(),
+            "optimizer_state_dict": optimizer.state_dict(),
+            "recalls": recalls,                  # 放在checkpoint里没问题（torch.save能存numpy/tensor）
+            "best_r1": best_r1,                  # 注意：这里是更新后的 best
+            "not_improved_num": not_improved_num
+        },
+        is_best,
+        filename="last_model.pth"
+    )
+
+    # ===================== Save per-epoch weights (your existing behavior) =====================
+    epoch_model_filename = f"model_epoch_{epoch_num:02d}.pth"
+    epoch_model_path = join(args.save_dir, epoch_model_filename)
+    torch.save(model.state_dict(), epoch_model_path)
+    logging.info(f"Model weights for epoch {epoch_num:02d} saved to {epoch_model_path}")
+
+    # ===================== Write best checkpoint pointer (NEW) =====================
+    if is_best:
+        # util.save_checkpoint typically creates args.save_dir/best_model.pth
+        best_path = join(args.save_dir, "best_model.pth")
+        with open(join(args.save_dir, "best_ckpt.txt"), "w") as f:
+            f.write(best_path + "\n")
+        with open(join(args.save_dir, "best_epoch.txt"), "w") as f:
+            f.write(str(epoch_num) + "\n")
+
+    # ===================== Write JSON metrics (NEW, safe serialization) =====================
+    metrics_dir = join(args.save_dir, "metrics")
+    os.makedirs(metrics_dir, exist_ok=True)
+    val_json_path = join(metrics_dir, "val_pitts30k.json")
+
+    payload = {
+        "dataset": str(args.eval_dataset_name),
+        "split": "val",
+        "epoch": int(epoch_num),
+        "is_best": bool(is_best),
+        "best_r1_so_far": float(best_r1),
+        "metrics": val_metrics,         # 只包含 Python float
+        "recalls_str": recalls_str
+    }
+    with open(val_json_path, "w") as f:
+        json.dump(payload, f, ensure_ascii=False, indent=2)
+
+    # ===================== Early stop =====================
+    if not is_best and not_improved_num >= args.patience:
+        logging.info(f"Performance did not improve for {not_improved_num} epochs. Stop training.")
+        break
+    logging.info(f"[DEBUG] current_r1 scalar = {current_r1}, recalls_str = {recalls_str}")
 
 logging.info(f"Best R@1: {best_r1:.3f}")
 logging.info(f"Trained for {epoch_num+1:02d} epochs, in total in {str(datetime.now() - start_time)[:-7]}")
@@ -184,4 +266,5 @@ logging.info("Test *last* model on test set")
 last_model_state_dict = torch.load(join(args.save_dir, "last_model.pth"), weights_only=False)["model_state_dict"]
 model.load_state_dict(last_model_state_dict)
 recalls, recalls_str = test.test(args, test_ds, model, test_method=args.test_method)
+print(type(recalls), type(recalls["queries"]), type(recalls["queries"][0]))
 logging.info(f"Recalls on {test_ds}: {recalls_str}")

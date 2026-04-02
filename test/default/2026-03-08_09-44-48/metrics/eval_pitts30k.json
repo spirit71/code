@@ -1,0 +1,12 @@
+{
+  "dataset": "pitts30k",
+  "metrics": {
+    "R@1": 93.207,
+    "R@5": 96.626,
+    "R@10": 97.814,
+    "R@20": 98.548
+  },
+  "combined_str": "R@1: 93.207, R@5: 96.626, R@10: 97.814, R@20: 98.548",
+  "resume": "./logs/logs/default/2026-01-25_14-18-27_edtf_repro_seed42/2026-01-25_14-18-33/best_model.pth",
+  "seed": 42
+}

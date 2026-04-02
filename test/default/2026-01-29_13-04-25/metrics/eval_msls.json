@@ -1,0 +1,12 @@
+{
+  "dataset": "msls",
+  "metrics": {
+    "R@1": 89.21,
+    "R@5": 94.334,
+    "R@10": 95.642,
+    "R@20": 96.743
+  },
+  "combined_str": "R@1: 89.210, R@5: 94.334, R@10: 95.642, R@20: 96.743",
+  "resume": "logs/./logs/default/2026-01-25_14-18-27_edtf_repro_seed42/2026-01-25_14-18-33/best_model.pth",
+  "seed": 0
+}

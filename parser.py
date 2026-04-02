@@ -21,7 +21,7 @@ def parse_arguments():
     parser.add_argument('--pca_dim', type=int, default=None, help="PCA dimension (number of principal components). If None, PCA is not used.")
 
     # Initialization parameters
-    parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--foundation_model_path", type=str, default=None,
                         help="Path to load foundation model checkpoint.")
     parser.add_argument("--resume", type=str, default=None,
@@ -56,6 +56,8 @@ def parse_arguments():
                         help="Path with images to be used to compute PCA (ie: pitts30k/images/train")
     parser.add_argument("--save_dir", type=str, default="default",
                         help="Folder name of the current run (saved in ./logs/)")
+    parser.add_argument("--output_dir", type=str, default=None)
+
     args = parser.parse_args()
     if args.eval_datasets_folder == None:
         try:

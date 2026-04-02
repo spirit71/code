@@ -1,0 +1,12 @@
+{
+  "dataset": "Tokyo247/images",
+  "metrics": {
+    "R@1": 97.778,
+    "R@5": 98.413,
+    "R@10": 99.048,
+    "R@20": 99.048
+  },
+  "combined_str": "R@1: 97.778, R@5: 98.413, R@10: 99.048, R@20: 99.048",
+  "resume": "logs/./logs/default/2026-01-25_14-18-27_edtf_repro_seed42/2026-01-25_14-18-33/best_model.pth",
+  "seed": 0
+}

@@ -1,0 +1,12 @@
+{
+  "dataset": "images_winter_as_quries",
+  "metrics": {
+    "R@1": 88.913,
+    "R@5": 95.473,
+    "R@10": 97.119,
+    "R@20": 98.307
+  },
+  "combined_str": "R@1: 88.913, R@5: 95.473, R@10: 97.119, R@20: 98.307",
+  "resume": "logs/./logs/default/2026-01-25_14-18-27_edtf_repro_seed42/2026-01-25_14-18-33/best_model.pth",
+  "seed": 0
+}
