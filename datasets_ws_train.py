@@ -1,144 +1,158 @@
 # -*- coding: UTF-8 -*-
+"""Training datasets for repo-adapted SAGE.
+
+This module is intentionally kept API-compatible with the public repo's
+`datasets_ws.py` wherever possible, while adding the triplet mining utilities
+needed by the training script.
+"""
+
 import os
-import torch
-import faiss
 import logging
-import numpy as np
 from glob import glob
-from tqdm import tqdm
-from PIL import Image
 from os.path import join
+
+import faiss
+import numpy as np
+from PIL import Image
+from tqdm import tqdm
+from sklearn.neighbors import NearestNeighbors
+
+import torch
 import torch.utils.data as data
 import torchvision.transforms as transforms
 from torch.utils.data.dataset import Subset
-from sklearn.neighbors import NearestNeighbors
 from torch.utils.data.dataloader import DataLoader
+
 
 base_transform = transforms.Compose([
     transforms.ToTensor(),
     transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
 ])
 
+
 def path_to_pil_img(path):
     return Image.open(path).convert("RGB")
 
+
+
 def collate_fn(batch):
-    """Creates mini-batch tensors from the list of tuples (images, 
-        triplets_local_indexes, triplets_global_indexes).
-        triplets_local_indexes are the indexes referring to each triplet within images.
-        triplets_global_indexes are the global indexes of each image.
-    Args:
-        batch: list of tuple (images, triplets_local_indexes, triplets_global_indexes).
-            considering each query to have 10 negatives (negs_num_per_query=10):
-            - images: torch tensor of shape (12, 3, h, w).
-            - triplets_local_indexes: torch tensor of shape (10, 3).
-            - triplets_global_indexes: torch tensor of shape (12).
-    Returns:
-        images: torch tensor of shape (batch_size*12, 3, h, w).
-        triplets_local_indexes: torch tensor of shape (batch_size*10, 3).
-        triplets_global_indexes: torch tensor of shape (batch_size, 12).
+    """Collate a batch of triplets.
+
+    Output:
+        images: [batch_size*(2+N), 3, H, W]
+        triplets_local_indexes: [batch_size*N, 3]
+        triplets_global_indexes: [batch_size, 2+N]
     """
-    images                  = torch.cat([e[0] for e in batch])
-    triplets_local_indexes  = torch.cat([e[1][None] for e in batch])
+    images = torch.cat([e[0] for e in batch])
+    triplets_local_indexes = torch.cat([e[1][None] for e in batch])
     triplets_global_indexes = torch.cat([e[2][None] for e in batch])
     for i, (local_indexes, global_indexes) in enumerate(zip(triplets_local_indexes, triplets_global_indexes)):
-        local_indexes += len(global_indexes) * i  # Increment local indexes by offset (len(global_indexes) is 12)
+        local_indexes += len(global_indexes) * i
     return images, torch.cat(tuple(triplets_local_indexes)), triplets_global_indexes
 
 
 class PCADataset(data.Dataset):
     def __init__(self, args, datasets_folder="dataset", dataset_folder="pitts30k/images/train"):
         dataset_folder_full_path = join(datasets_folder, dataset_folder)
-        if not os.path.exists(dataset_folder_full_path) :
+        if not os.path.exists(dataset_folder_full_path):
             raise FileNotFoundError(f"Folder {dataset_folder_full_path} does not exist")
         self.images_paths = sorted(glob(join(dataset_folder_full_path, "**", "*.jpg"), recursive=True))
         self.resize = args.resize
+
     def __getitem__(self, index):
         img = base_transform(path_to_pil_img(self.images_paths[index]))
         img = transforms.functional.resize(img, self.resize)
         return img
+
     def __len__(self):
         return len(self.images_paths)
 
 
 class BaseDataset(data.Dataset):
-    """Dataset with images from database and queries, used for inference (testing and building cache).
-    """
+    """Dataset used for inference/testing and cache construction."""
+
     def __init__(self, args, datasets_folder="datasets", dataset_name="pitts30k", split="train"):
         super().__init__()
         self.args = args
         self.dataset_name = dataset_name
         self.dataset_folder = join(datasets_folder, dataset_name, "images", split)
-        if not os.path.exists(self.dataset_folder): raise FileNotFoundError(f"Folder {self.dataset_folder} does not exist")
-        
+        if not os.path.exists(self.dataset_folder):
+            raise FileNotFoundError(f"Folder {self.dataset_folder} does not exist")
+
         self.resize = args.resize
         self.test_method = args.test_method
-        
-        #### Read paths and UTM coordinates for all images.
+
         database_folder = join(self.dataset_folder, "database")
-        queries_folder  = join(self.dataset_folder, "queries")
-        if not os.path.exists(database_folder): raise FileNotFoundError(f"Folder {database_folder} does not exist")
-        if not os.path.exists(queries_folder) : raise FileNotFoundError(f"Folder {queries_folder} does not exist")
+        queries_folder = join(self.dataset_folder, "queries")
+        if not os.path.exists(database_folder):
+            raise FileNotFoundError(f"Folder {database_folder} does not exist")
+        if not os.path.exists(queries_folder):
+            raise FileNotFoundError(f"Folder {queries_folder} does not exist")
+
         self.database_paths = sorted(glob(join(database_folder, "**", "*.jpg"), recursive=True))
-        self.queries_paths  = sorted(glob(join(queries_folder, "**", "*.jpg"),  recursive=True))
-        # The format must be path/to/file/@utm_easting@utm_northing@...@.jpg
-        self.database_utms = np.array([(path.split("@")[1], path.split("@")[2]) for path in self.database_paths]).astype(np.float64)
-        self.queries_utms  = np.array([(path.split("@")[1], path.split("@")[2]) for path in self.queries_paths]).astype(np.float64)
-        
-        # Find soft_positives_per_query, which are within val_positive_dist_threshold (deafult 25 meters)
+        self.queries_paths = sorted(glob(join(queries_folder, "**", "*.jpg"), recursive=True))
+
+        # Filename pattern follows the Visual Geo-localization Benchmark:
+        # .../@utm_easting@utm_northing@...@.jpg
+        self.database_utms = np.array([(p.split("@")[1], p.split("@")[2]) for p in self.database_paths]).astype(np.float64)
+        self.queries_utms = np.array([(p.split("@")[1], p.split("@")[2]) for p in self.queries_paths]).astype(np.float64)
+
         knn = NearestNeighbors(n_jobs=-1)
         knn.fit(self.database_utms)
-        self.soft_positives_per_query = knn.radius_neighbors(self.queries_utms, 
-                                                             radius=args.val_positive_dist_threshold,
-                                                             return_distance=False)
-        
+        self.soft_positives_per_query = list(knn.radius_neighbors(
+            self.queries_utms,
+            radius=args.val_positive_dist_threshold,
+            return_distance=False,
+        ))
+
         self.images_paths = list(self.database_paths) + list(self.queries_paths)
-        
         self.database_num = len(self.database_paths)
-        self.queries_num  = len(self.queries_paths)
-    
+        self.queries_num = len(self.queries_paths)
+        logging.info(f"[DEBUG] len(queries_paths) = {len(self.queries_paths)}")
+        logging.info(f"[DEBUG] len(queries_utms) = {len(self.queries_utms)}")
+        logging.info(f"[DEBUG] len(soft_positives_per_query) = {len(self.soft_positives_per_query)}")
+
     def __getitem__(self, index):
         img = path_to_pil_img(self.images_paths[index])
         img = base_transform(img)
-        # With database images self.test_method should always be "hard_resize"
         if self.test_method == "hard_resize":
-            # self.test_method=="hard_resize" is the default, resizes all images to the same size.
             img = transforms.functional.resize(img, self.resize)
         else:
             img = self._test_query_transform(img)
         return img, index
-    
+
     def _test_query_transform(self, img):
-        """Transform query image according to self.test_method."""
-        C, H, W = img.shape
+        _, h, w = img.shape
         if self.test_method == "single_query":
-            # self.test_method=="single_query" is used when queries have varying sizes, and can't be stacked in a batch.
-            processed_img = transforms.functional.resize(img, self.resize) #min(self.resize)
+            processed_img = transforms.functional.resize(img, self.resize)
         elif self.test_method == "central_crop":
-            # Take the biggest central crop of size self.resize. Preserves ratio.
-            scale = max(self.resize[0]/H, self.resize[1]/W)
+            scale = max(self.resize[0] / h, self.resize[1] / w)
             processed_img = torch.nn.functional.interpolate(img.unsqueeze(0), scale_factor=scale).squeeze(0)
             processed_img = transforms.functional.center_crop(processed_img, self.resize)
             assert processed_img.shape[1:] == torch.Size(self.resize), f"{processed_img.shape[1:]} {self.resize}"
-        elif self.test_method == "five_crops" or self.test_method == 'nearest_crop' or self.test_method == 'maj_voting':
-            # Get 5 square crops with size==shorter_side (usually 480). Preserves ratio and allows batches.
+        elif self.test_method in ("five_crops", "nearest_crop", "maj_voting"):
             shorter_side = min(self.resize)
             processed_img = transforms.functional.resize(img, shorter_side)
             processed_img = torch.stack(transforms.functional.five_crop(processed_img, shorter_side))
-            assert processed_img.shape == torch.Size([5, 3, shorter_side, shorter_side]), \
+            assert processed_img.shape == torch.Size([5, 3, shorter_side, shorter_side]), (
                 f"{processed_img.shape} {torch.Size([5, 3, shorter_side, shorter_side])}"
+            )
+        else:
+            raise ValueError(f"Unsupported test_method: {self.test_method}")
         return processed_img
-    
+
     def __len__(self):
         return len(self.images_paths)
+
     def __repr__(self):
-        return  (f"< {self.__class__.__name__}, {self.dataset_name} - #database: {self.database_num}; #queries: {self.queries_num} >")
+        return f"< {self.__class__.__name__}, {self.dataset_name} - #database: {self.database_num}; #queries: {self.queries_num} >"
+
     def get_positives(self):
         return self.soft_positives_per_query
 
 
 class RAMEfficient2DMatrix:
-    """Sparse-row feature cache used by full-database mining (saves RAM)."""
+    """Sparse-row feature cache used by full-database mining."""
 
     def __init__(self, shape, dtype=np.float32):
         self.shape = shape
@@ -156,6 +170,7 @@ class RAMEfficient2DMatrix:
         return self.matrix[index]
 
 
+
 def _minmax_norm_1d(x):
     lo, hi = float(np.min(x)), float(np.max(x))
     if hi - lo < 1e-12:
@@ -164,15 +179,13 @@ def _minmax_norm_1d(x):
 
 
 class TripletsDataset(BaseDataset):
-    """Training triplets with cache refresh; supports SAGE-style geo-visual mining."""
+    """Training dataset with periodic cache refresh and several mining modes."""
 
     def __init__(self, args, datasets_folder="datasets", dataset_name="pitts30k", split="train", negs_num_per_query=10):
         super().__init__(args, datasets_folder, dataset_name, split)
         self.mining = args.mining
         self.neg_samples_num = args.neg_samples_num
         self.negs_num_per_query = negs_num_per_query
-        if self.mining == "full":
-            self.neg_cache = [np.empty((0,), dtype=np.int32) for _ in range(self.queries_num)]
         self.is_inference = False
 
         aug = []
@@ -205,22 +218,49 @@ class TripletsDataset(BaseDataset):
         queries_without_any_hard_positive = np.where(
             np.array([len(p) for p in self.hard_positives_per_query]) == 0
         )[0]
+
         if len(queries_without_any_hard_positive) != 0:
             logging.info(
                 f"There are {len(queries_without_any_hard_positive)} queries without positives "
                 "within the training threshold; they are removed."
             )
-            self.hard_positives_per_query = np.delete(
-                self.hard_positives_per_query, queries_without_any_hard_positive
-            )
-            self.soft_positives_per_query = np.delete(
-                self.soft_positives_per_query, queries_without_any_hard_positive
-            )
-            self.queries_paths = np.delete(self.queries_paths, queries_without_any_hard_positive)
-            self.queries_utms = np.delete(self.queries_utms, queries_without_any_hard_positive, axis=0)
+            keep_mask = np.ones(len(self.hard_positives_per_query), dtype=bool)
+            keep_mask[queries_without_any_hard_positive] = False
 
+            self.hard_positives_per_query = [
+                self.hard_positives_per_query[i]
+                for i in range(len(self.hard_positives_per_query))
+                if keep_mask[i]
+            ]
+            self.soft_positives_per_query = [
+                self.soft_positives_per_query[i]
+                for i in range(len(self.soft_positives_per_query))
+                if keep_mask[i]
+            ]
+            self.queries_paths = np.array(self.queries_paths)[keep_mask]
+            self.queries_utms = self.queries_utms[keep_mask]
+
+        self.queries_paths = list(self.queries_paths)
         self.images_paths = list(self.database_paths) + list(self.queries_paths)
         self.queries_num = len(self.queries_paths)
+
+        logging.info(f"[DEBUG] len(queries_paths) = {len(self.queries_paths)}")
+        logging.info(f"[DEBUG] len(queries_utms) = {len(self.queries_utms)}")
+        logging.info(f"[DEBUG] len(soft_positives_per_query) = {len(self.soft_positives_per_query)}")
+        logging.info(f"[DEBUG] len(hard_positives_per_query) = {len(self.hard_positives_per_query)}")
+
+        assert len(self.queries_paths) == len(self.queries_utms), (
+            f"len(queries_paths)={len(self.queries_paths)} vs len(queries_utms)={len(self.queries_utms)}"
+        )
+        assert len(self.queries_paths) == len(self.soft_positives_per_query), (
+            f"len(queries_paths)={len(self.queries_paths)} vs len(soft_positives_per_query)={len(self.soft_positives_per_query)}"
+        )
+        assert len(self.queries_paths) == len(self.hard_positives_per_query), (
+            f"len(queries_paths)={len(self.queries_paths)} vs len(hard_positives_per_query)={len(self.hard_positives_per_query)}"
+        )
+
+        if self.mining == "full":
+            self.neg_cache = [np.empty((0,), dtype=np.int32) for _ in range(self.queries_num)]
 
         if self.mining == "msls_weighted":
             notes = [p.split("@")[-2] for p in self.queries_paths]
@@ -360,13 +400,21 @@ class TripletsDataset(BaseDataset):
             extra = np.setdiff1d(neg_cand, out, assume_unique=False)
             if len(extra) == 0:
                 extra = np.arange(self.database_num, dtype=np.int32)
-            fill = np.random.choice(extra, self.negs_num_per_query - len(out), replace=False)
+            replace = len(extra) < (self.negs_num_per_query - len(out))
+            fill = np.random.choice(extra, self.negs_num_per_query - len(out), replace=replace)
             out = np.concatenate([out, fill.astype(np.int32)])
         return out[: self.negs_num_per_query]
 
+    def _sample_valid_queries(self, num, use_weights=False):
+        valid_queries_num = len(self.hard_positives_per_query)
+        sample_size = min(num, valid_queries_num)
+        if use_weights:
+            return np.random.choice(valid_queries_num, sample_size, replace=False, p=self.weights)
+        return np.random.choice(valid_queries_num, sample_size, replace=False)
+
     def compute_triplets_random(self, args, model):
         self.triplets_global_indexes = []
-        sampled_queries_indexes = np.random.choice(self.queries_num, args.cache_refresh_rate, replace=False)
+        sampled_queries_indexes = self._sample_valid_queries(args.cache_refresh_rate)
         positives_indexes = [self.hard_positives_per_query[i] for i in sampled_queries_indexes]
         positives_indexes = [p for pos in positives_indexes for p in pos]
         positives_indexes = list(np.unique(positives_indexes))
@@ -377,7 +425,9 @@ class TripletsDataset(BaseDataset):
             best_positive_index = self.get_best_positive_index(args, query_index, cache, query_features)
             soft_positives = self.soft_positives_per_query[query_index]
             neg_indexes = np.random.choice(
-                self.database_num, size=self.negs_num_per_query + len(soft_positives), replace=False
+                self.database_num,
+                size=self.negs_num_per_query + len(soft_positives),
+                replace=False,
             )
             neg_indexes = np.setdiff1d(neg_indexes, soft_positives, assume_unique=True)[: self.negs_num_per_query]
             self.triplets_global_indexes.append((query_index, best_positive_index, *neg_indexes))
@@ -385,7 +435,7 @@ class TripletsDataset(BaseDataset):
 
     def compute_triplets_full(self, args, model):
         self.triplets_global_indexes = []
-        sampled_queries_indexes = np.random.choice(self.queries_num, args.cache_refresh_rate, replace=False)
+        sampled_queries_indexes = self._sample_valid_queries(args.cache_refresh_rate)
         database_indexes = list(range(self.database_num))
         subset_ds = Subset(self, database_indexes + list(sampled_queries_indexes + self.database_num))
         cache = self.compute_cache(args, model, subset_ds, (len(self), args.features_dim))
@@ -404,11 +454,9 @@ class TripletsDataset(BaseDataset):
     def compute_triplets_partial(self, args, model):
         self.triplets_global_indexes = []
         if self.mining == "partial":
-            sampled_queries_indexes = np.random.choice(self.queries_num, args.cache_refresh_rate, replace=False)
+            sampled_queries_indexes = self._sample_valid_queries(args.cache_refresh_rate)
         else:
-            sampled_queries_indexes = np.random.choice(
-                self.queries_num, args.cache_refresh_rate, replace=False, p=self.weights
-            )
+            sampled_queries_indexes = self._sample_valid_queries(args.cache_refresh_rate, use_weights=True)
         sampled_database_indexes = np.random.choice(self.database_num, self.neg_samples_num, replace=False)
         positives_indexes = [self.hard_positives_per_query[i] for i in sampled_queries_indexes]
         positives_indexes = [p for pos in positives_indexes for p in pos]
@@ -426,7 +474,7 @@ class TripletsDataset(BaseDataset):
 
     def compute_triplets_sage(self, args, model):
         self.triplets_global_indexes = []
-        sampled_queries_indexes = np.random.choice(self.queries_num, args.cache_refresh_rate, replace=False)
+        sampled_queries_indexes = self._sample_valid_queries(args.cache_refresh_rate)
         sampled_database_indexes = np.random.choice(self.database_num, self.neg_samples_num, replace=False)
         positives_indexes = [self.hard_positives_per_query[i] for i in sampled_queries_indexes]
         positives_indexes = [p for pos in positives_indexes for p in pos]

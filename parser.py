@@ -13,19 +13,31 @@ def parse_arguments():
     parser.add_argument("--optim", type=str, default="adamw", help="_", choices=["adam", "sgd", "adamw"])
     parser.add_argument("--epochs_num", type=int, default=30,
                         help="number of epochs to train for")
-    # parser.add_argument("--criterion", type=str, default='triplet', help='loss to be used',
-    #                     choices=["triplet", "sare_ind", "sare_joint"])
-    # parser.add_argument("--margin", type=float, default=0.1,
-    #                     help="margin for the triplet loss")
-    # parser.add_argument("--cache_refresh_rate", type=int, default=1000,
-    #                     help="How often to refresh cache, in number of queries")
-    # parser.add_argument("--queries_per_epoch", type=int, default=5000,
-    #                     help="How many queries to consider for one epoch. Must be multiple of cache_refresh_rate")
-    # parser.add_argument("--negs_num_per_query", type=int, default=10,
-    #                     help="How many negatives to consider per each query in the loss")
-    # parser.add_argument("--neg_samples_num", type=int, default=1000,
-    #                     help="How many negatives to use to compute the hardest ones")
-    # parser.add_argument("--mining", type=str, default="partial", choices=["partial", "full", "random", "msls_weighted"])
+    parser.add_argument("--criterion", type=str, default="triplet",
+                        help="loss to be used", choices=["triplet", "sare_ind", "sare_joint"])
+    parser.add_argument("--margin", type=float, default=0.1,
+                        help="margin for the triplet loss")
+    parser.add_argument("--cache_refresh_rate", type=int, default=1000,
+                        help="How often to refresh cache, in number of queries")
+    parser.add_argument("--queries_per_epoch", type=int, default=5000,
+                        help="How many queries to consider for one epoch. Must be multiple of cache_refresh_rate")
+    parser.add_argument("--negs_num_per_query", type=int, default=10,
+                        help="How many negatives per query in each training tuple")
+    parser.add_argument("--neg_samples_num", type=int, default=1000,
+                        help="How many random database images to pool before hard mining")
+    parser.add_argument(
+        "--mining",
+        type=str,
+        default="sage",
+        choices=["partial", "full", "random", "msls_weighted", "sage"],
+        help="'sage' fuses visual similarity with geographic proximity, then greedy clique expansion on embeddings",
+    )
+    parser.add_argument("--sage_geo_weight", type=float, default=0.35,
+                        help="Weight of geographic affinity in fused mining score (sage mining)")
+    parser.add_argument("--sage_vis_weight", type=float, default=0.65,
+                        help="Weight of visual similarity in fused mining score (sage mining)")
+    parser.add_argument("--sage_pool_size", type=int, default=256,
+                        help="Top fused-score candidates kept before clique expansion")
 
     # Inference parameters
     parser.add_argument("--infer_batch_size", type=int, default=16,
@@ -51,22 +63,34 @@ def parse_arguments():
                         help="only for majority voting, scale factor, the higher it is the more importance is given to agreement")
     parser.add_argument("--efficient_ram_testing", action='store_true', help="_")
     parser.add_argument("--val_positive_dist_threshold", type=int, default=25, help="_")
-    parser.add_argument("--train_positives_dist_threshold", type=int, default=10, help="_")
-    parser.add_argument('--recall_values', type=int, default=[1, 5, 10, 100], nargs="+",
+    parser.add_argument("--train_positives_dist_threshold", type=int, default=25, help="_")
+    parser.add_argument('--recall_values', type=int, default=[1, 5, 10, 20], nargs="+",
                         help="Recalls to be computed, such as R@5.")
-    # # Data augmentation parameters
-    # parser.add_argument("--brightness", type=float, default=None, help="_")
-    # parser.add_argument("--contrast", type=float, default=None, help="_")
-    # parser.add_argument("--saturation", type=float, default=None, help="_")
-    # parser.add_argument("--hue", type=float, default=None, help="_")
-    # parser.add_argument("--rand_perspective", type=float, default=None, help="_")
-    # parser.add_argument("--horizontal_flip", action='store_true', help="_")
-    # parser.add_argument("--random_resized_crop", type=float, default=None, help="_")
-    # parser.add_argument("--random_rotation", type=float, default=None, help="_")
+    parser.add_argument("--brightness", type=float, default=0.0, help="ColorJitter (0 disables)")
+    parser.add_argument("--contrast", type=float, default=0.0, help="_")
+    parser.add_argument("--saturation", type=float, default=0.0, help="_")
+    parser.add_argument("--hue", type=float, default=0.0, help="_")
+    parser.add_argument("--rand_perspective", type=float, default=0.0, help="_")
+    parser.add_argument("--horizontal_flip", action="store_true", help="Apply random horizontal flip to the full batch")
+    parser.add_argument("--random_resized_crop", type=float, default=0.0,
+                        help="If >0, RandomResizedCrop scale lower bound is (1 - this value)")
+    parser.add_argument("--random_rotation", type=float, default=0.0, help="RandomRotation max degrees")
 
     # Paths parameters
-    parser.add_argument("--eval_datasets_folder", type=str, default=None, help="Path with all datasets")
-    parser.add_argument("--eval_dataset_name", type=str, default="sped", help="Relative path of the dataset")
+    parser.add_argument("--eval_datasets_folder", type=str, default="/home/code_qy_7_28/VPR-datasets-downloader/datasets", help="Path with all datasets")
+    parser.add_argument(
+        "--train_datasets_folder",
+        type=str,
+        default="/home/code_qy_7_28/VPR-datasets-downloader/datasets",
+        help="Root folder for training/val data (defaults to --eval_datasets_folder)",
+    )
+    parser.add_argument(
+        "--train_dataset_name",
+        type=str,
+        default="gsv_cities",
+        help="Dataset name under the training root (same layout as the VPR benchmark)",
+    )
+    parser.add_argument("--eval_dataset_name", type=str, default="sped/images", help="Relative path of the dataset")
     parser.add_argument("--pca_dataset_folder", type=str, default=None,
                         help="Path with images to be used to compute PCA (ie: pitts30k/images/train")
     parser.add_argument("--save_dir", type=str, default="default",
@@ -75,7 +99,8 @@ def parse_arguments():
         "--eval_dataset_names", 
         type=str, 
         nargs='+', 
-        default=["sped", "amstertime", "Msls_740", "pitts30k", "tokyo247", "pitts250k", "nordland", "eynsham"],
+        # default=["sped", "amstertime", "Msls_740", "pitts30k", "tokyo247", "pitts250k", "nordland", "eynsham"],
+        default=[  "pitts30k", "Tokyo247", "Nordland", "eynsham"],
         help="List of datasets to evaluate on"
     )
     parser.add_argument("--crossimage_encoder", action='store_true', help="_")
@@ -88,7 +113,10 @@ def parse_arguments():
         help="Directory (or full filepath) to save or load the PCA model"
     )
     args = parser.parse_args()
-    
+
+    if getattr(args, "train_datasets_folder", None) is None:
+        args.train_datasets_folder = args.eval_datasets_folder
+
     if args.eval_datasets_folder == None:
         try:
             args.eval_datasets_folder = os.environ['DATASETS_FOLDER']
@@ -99,6 +127,23 @@ def parse_arguments():
     
     if args.pca_dim != None and args.pca_dataset_folder == None:
         raise ValueError("Please specify --pca_dataset_folder when using pca")
-    
+
+    if getattr(args, "queries_per_epoch", None) is not None and getattr(args, "cache_refresh_rate", None) is not None:
+        if args.queries_per_epoch % args.cache_refresh_rate != 0:
+            raise ValueError(
+                "queries_per_epoch must be divisible by cache_refresh_rate "
+                f"({args.queries_per_epoch} % {args.cache_refresh_rate} != 0)"
+            )
+
+    if args.mining == "msls_weighted":
+        if args.train_dataset_name.lower() not in ("msls", "msls_740"):
+            raise ValueError(
+                "msls_weighted mining requires train_dataset_name 'msls' or 'msls_740' (Mapillary SLS layout)."
+            )
+
+    wg = getattr(args, "sage_geo_weight", 0.0) + getattr(args, "sage_vis_weight", 0.0)
+    if args.mining == "sage" and abs(wg - 1.0) > 1e-3:
+        raise ValueError(f"sage_geo_weight + sage_vis_weight should sum to 1.0, got {wg}")
+
     return args
 

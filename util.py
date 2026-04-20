@@ -15,6 +15,14 @@ def save_checkpoint(args, state, filename, recalls_rerank):
     model_path = join(args.save_dir, f"Retrieval_R1_{recalls_rerank[0]:.2f}_R5_{recalls_rerank[1]:.2f}_R10_{recalls_rerank[2]:.2f}_{filename}")
     torch.save(state, model_path)
 
+
+def save_training_checkpoint(args, state, is_best):
+    """Save last checkpoint each epoch; copy to best_model.pth when validation improves."""
+    last_path = join(args.save_dir, "last_model.pth")
+    torch.save(state, last_path)
+    if is_best:
+        shutil.copy(last_path, join(args.save_dir, "best_model.pth"))
+
 def resume_model(args, model):
     checkpoint = torch.load(args.resume, map_location=args.device)
     if 'model_state_dict' in checkpoint:
