@@ -23,6 +23,7 @@ class BoQModel(L.LightningModule):
             warmup_epochs=10,
             milestones=[10, 20],
             silent=False,
+            recall_ks=[1, 5, 10, 20]  # [修改] 增加默认的 Recall K 值列表
         ):
         super().__init__()
         self.backbone = backbone
@@ -33,6 +34,7 @@ class BoQModel(L.LightningModule):
         self.warmup_epochs = warmup_epochs
         self.milestones = milestones
         self.silent = silent # disable console output
+        self.recall_ks = recall_ks
         
         # init loss function and miner
         self.ms_loss = losses.MultiSimilarityLoss(alpha=1, beta=50, base=0.)
@@ -98,7 +100,14 @@ class BoQModel(L.LightningModule):
 
     def validation_step(self, batch, batch_idx, dataloader_idx=0):
         images, _ = batch
-        descriptors, attentions = self(images)
+        # Support multi-crop tensors: [B, Ncrops, C, H, W]
+        if images.ndim == 5:
+            bsz, ncrops, c, h, w = images.shape
+            images = images.view(bsz * ncrops, c, h, w)
+            descriptors, attentions = self(images)
+            descriptors = descriptors.view(bsz, ncrops, -1).mean(dim=1)
+        else:
+            descriptors, attentions = self(images)
         descriptors = descriptors.detach().cpu()#.numpy()
         
         if dataloader_idx not in self.validation_outputs:
@@ -130,12 +139,16 @@ class BoQModel(L.LightningModule):
                         dataset.num_references,
                         dataset.num_queries,
                         dataset.ground_truth,
-                        k_values=[1, 5, 10, 15],
+                        k_values=self.recall_ks,  # [修改] 使用类属性
                 )
                 recalls_log = {
-                    f"{dataset.dataset_name}/R@1": recalls_dict[1],
-                    f"{dataset.dataset_name}/R@5": recalls_dict[5],
+                    # f"{dataset.dataset_name}/R@1": recalls_dict[1],
+                    # f"{dataset.dataset_name}/R@5": recalls_dict[5],
                 }
+                # [修改] 动态记录所有定义的 K 值 (R@1, R@5, R@10, R@20)
+                for k in self.recall_ks:
+                    if k in recalls_dict:
+                        recalls_log[f"{dataset.dataset_name}/R@{k}"] = recalls_dict[k]
                 recalls[dataset.dataset_name] = recalls_dict
                 
                 # add to the logger but not the progress bar 
@@ -148,3 +161,74 @@ class BoQModel(L.LightningModule):
                 list(recalls.keys()),
             )
         self.validation_outputs.clear()
+    # -----------------------------------------------------------------------
+    # TEST LOGIC [新增]
+    # -----------------------------------------------------------------------
+    def on_test_epoch_start(self):
+        # 初始化测试输出字典
+        self.test_outputs = {}
+
+    def test_step(self, batch, batch_idx, dataloader_idx=0):
+        # 复用验证逻辑，但存储到 test_outputs
+        images, _ = batch
+        # Support multi-crop tensors: [B, Ncrops, C, H, W]
+        if images.ndim == 5:
+            bsz, ncrops, c, h, w = images.shape
+            images = images.view(bsz * ncrops, c, h, w)
+            descriptors, attentions = self(images)
+            descriptors = descriptors.view(bsz, ncrops, -1).mean(dim=1)
+        else:
+            descriptors, attentions = self(images)
+        descriptors = descriptors.detach().cpu()
+        
+        if dataloader_idx not in self.test_outputs:
+            self.test_outputs[dataloader_idx] = []
+            
+        self.test_outputs[dataloader_idx].append(descriptors)
+
+    def on_test_epoch_end(self):
+        # 获取测试 dataloaders
+        test_dataloaders = self.trainer.test_dataloaders
+        if not isinstance(test_dataloaders, list):
+            test_dataloaders = [test_dataloaders]
+            
+        recalls = {} 
+        
+        print(f"\n{'='*20} TESTING RESULTS {'='*20}")
+        
+        for dataloader_idx, descriptors_list in self.test_outputs.items():
+            # 聚合当前数据集的所有描述符
+            descriptors = torch.cat(descriptors_list, dim=0)
+            dataset = test_dataloaders[dataloader_idx].dataset
+            
+            print(f"Evaluating: {dataset.dataset_name} ...")
+
+            # 计算 Recall (包含 R@1, R@5, R@10, R@20)
+            recalls_dict = utils.compute_recall_performance(
+                    descriptors, 
+                    dataset.num_references,
+                    dataset.num_queries,
+                    dataset.ground_truth,
+                    k_values=self.recall_ks, 
+            )
+            
+            # 构建日志字典
+            recalls_log = {}
+            for k in self.recall_ks:
+                if k in recalls_dict:
+                    recalls_log[f"{dataset.dataset_name}/R@{k}"] = recalls_dict[k]
+            
+            recalls[dataset.dataset_name] = recalls_dict
+            
+            # 记录到 Tensorboard / Logger
+            self.log_dict(recalls_log, prog_bar=False, logger=True)
+        
+        # 在控制台显示漂亮的表格
+        if recalls and not self.silent:
+            utils.display_recall_performance(
+                list(recalls.values()), 
+                list(recalls.keys()),
+            )
+        
+        # 清理内存
+        self.test_outputs.clear()

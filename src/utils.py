@@ -22,7 +22,7 @@ def compute_recall_performance(
                 num_references,
                 num_queries,
                 ground_truth,
-                k_values=[1, 5, 10],
+                k_values=[1, 5, 10, 20],
     ):
     """
     Compute recall@K scores for a given dataset and descriptors using FAISS.
@@ -65,7 +65,8 @@ def compute_recall_performance(
     for q_idx, pred in enumerate(predictions):
         for i, n in enumerate(k_values):
             # if in top N then also in top NN, where NN > N
-            if np.any(np.in1d(pred[:n], ground_truth[q_idx])):
+            # if np.any(np.in1d(pred[:n], ground_truth[q_idx])):
+            if np.any(np.isin(pred[:n], ground_truth[q_idx])):
                 correct_at_k[i:] += 1
                 break
 
@@ -130,7 +131,6 @@ def display_datasets_stats(datamodule):
         val_branch = val_tree.add(f"{val_set.dataset_name}")
         val_branch.add(f"Queries    [green]{val_set.num_queries}[/green]")
         val_branch.add(f"References [green]{val_set.num_references}[/green]")
-        
     tree_panel = Panel(val_tree, title=f"[bold]Validation Datasets[/bold]", padding=(1, 2), expand=False)
     
     console.print(tree_panel)
