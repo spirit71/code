@@ -39,10 +39,11 @@ class BoQModel(L.LightningModule):
         # init loss function and miner
         self.ms_loss = losses.MultiSimilarityLoss(alpha=1, beta=50, base=0.)
         self.ms_miner = miners.MultiSimilarityMiner(epsilon=0.1)
+        self.last_test_recalls = {}
 
     def configure_optimizers(self):
         optimizer_params = [
-            {"params": self.backbone.parameters(),   "lr": self.lr, "weight_decay": self.weight_decay},
+            {"params": self.backbone.parameters(),   "lr": self.lr* self.lr_mul, "weight_decay": self.weight_decay},
             {"params": self.aggregator.parameters(), "lr": self.lr, "weight_decay": self.weight_decay},
         ]
         optimizer = torch.optim.AdamW(optimizer_params)
@@ -62,7 +63,9 @@ class BoQModel(L.LightningModule):
                 pg["lr"] = lr_scale * initial_lr
 
         optimizer.step(closure=optimizer_closure)
-        self.log('_LR', optimizer.param_groups[-1]['lr'], prog_bar=False, logger=True)
+        # self.log('_LR', optimizer.param_groups[-1]['lr'], prog_bar=False, logger=True)
+        self.log("lr/backbone", optimizer.param_groups[0]["lr"], prog_bar=False, logger=True)
+        self.log("lr/aggregator", optimizer.param_groups[1]["lr"], prog_bar=False, logger=True)
     
     @torch.compiler.disable()
     def compute_loss(self, descriptors, labels):
@@ -86,12 +89,18 @@ class BoQModel(L.LightningModule):
         descriptors, attentions = self(images)
         # compute loss
         loss = self.compute_loss(descriptors, labels)
-        self.log("loss", loss, prog_bar=True, logger=True)
+        # self.log("loss", loss, prog_bar=True, logger=True)
+        # ✅ 新增：记录 epoch 信息
+        self.log('train/loss', loss, on_step=True, on_epoch=True, prog_bar=True)
+        self.log('train/epoch', float(self.current_epoch), on_step=False, on_epoch=True, prog_bar=False)
         return loss 
 
     def on_train_epoch_end(self):
         # reload the dataframes to shuffle in-city
         # this is faster than reloading the entire dataloader
+        # 在每个 epoch 结束时记录
+        self.log('epoch_info/current_epoch', self.current_epoch, on_epoch=True)
+        self.log('epoch_info/global_step', self.global_step, on_epoch=True)
         self.trainer.train_dataloader.dataset._refresh_dataframes()
         
     def on_validation_epoch_start(self):
@@ -229,6 +238,9 @@ class BoQModel(L.LightningModule):
                 list(recalls.values()), 
                 list(recalls.keys()),
             )
+        
+        # Expose test recalls for external reporting (e.g., JSON/Markdown reports).
+        self.last_test_recalls = recalls
         
         # 清理内存
         self.test_outputs.clear()

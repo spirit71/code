@@ -2,13 +2,14 @@ dependencies = ['torch', 'torchvision']
 
 import sys
 import os
+from typing import Optional
 
 # Add BoQ's src directory directly to path
 boq_root = os.path.dirname(__file__)  # Root of the cloned repo
 sys.path.append(os.path.join(boq_root, "src"))  
 
 import torch
-from backbones import ResNet, DinoV2
+from backbones import ResNet, DinoV2, DinoV3
 from boq import BoQ
 
     
@@ -32,15 +33,34 @@ AVAILABLE_BACKBONES = {
     # "resnet18": [8192 , 4096],
     "resnet50": [16384],
     "dinov2": [12288],
+    "dinov3": [12288],
 }
 
 MODEL_URLS = {
     "resnet50_16384": "https://github.com/amaralibey/Bag-of-Queries/releases/download/v1.0/resnet50_16384.pth",
     "dinov2_12288": "https://github.com/amaralibey/Bag-of-Queries/releases/download/v1.0/dinov2_12288.pth",
+    # Optional: set by environment variable BOQ_DINOV3_12288_URL or pass model_url argument
+    "dinov3_12288": os.environ.get("BOQ_DINOV3_12288_URL", ""),
+
     # "resnet50_4096": "",
 }
 
-def get_trained_boq(backbone_name="resnet50", output_dim=16384):
+def _resolve_model_url(backbone_name: str, output_dim: int, model_url: Optional[str] = None):
+    if model_url:
+        return model_url
+
+    key = f"{backbone_name}_{output_dim}"
+    url = MODEL_URLS.get(key, "")
+    if url:
+        return url
+
+    raise ValueError(
+        f"No checkpoint URL configured for {key}. "
+        "Pass `model_url=...` or set env var `BOQ_DINOV3_12288_URL` (for dinov3)."
+    )
+
+
+def get_trained_boq(backbone_name="resnet50", output_dim=16384, model_url=None):
     if backbone_name not in AVAILABLE_BACKBONES:
         raise ValueError(f"backbone_name should be one of {list(AVAILABLE_BACKBONES.keys())}")
     try:
@@ -61,6 +81,17 @@ def get_trained_boq(backbone_name="resnet50", output_dim=16384):
             num_layers=2,
             row_dim=output_dim//384, # 32 for dinov2
         )
+    elif "dinov3" in backbone_name:
+        # load the backbone
+        backbone = DinoV3()
+        # load the aggregator
+        aggregator = BoQ(
+            in_channels=backbone.out_channels,  # make sure the backbone has out_channels attribute
+            proj_channels=384,
+            num_queries=64,
+            num_layers=2,
+            row_dim=output_dim//384, # 32 for dinov3 at output_dim=12288
+        )
         
     elif "resnet" in backbone_name:
         backbone = ResNet(
@@ -80,9 +111,10 @@ def get_trained_boq(backbone_name="resnet50", output_dim=16384):
             aggregator=aggregator
         )
     
+    checkpoint_url = _resolve_model_url(backbone_name, output_dim, model_url=model_url)
     vpr_model.load_state_dict(
         torch.hub.load_state_dict_from_url(
-            MODEL_URLS[f"{backbone_name}_{output_dim}"],
+            checkpoint_url,
             map_location=torch.device('cpu')
         )
     )

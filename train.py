@@ -13,16 +13,18 @@ from lightning.pytorch import Trainer, seed_everything
 from lightning.pytorch.loggers import TensorBoardLogger
 
 from src.utils import display_datasets_stats
-from src.backbones import DinoV2, ResNet
+from src.backbones import DinoV2, DinoV3, ResNet
 from src.boq import BoQ
 from src.model import BoQModel
 from src.dataloaders.datamodule import VPRDataModule
+from src.eval_reporting import build_eval_report, save_eval_report
 
 class HyperParams:
     def __init__(self):
         ## Backbone config:
-        self.backbone_name: str = "dinov2_vitb14"    # resnet18, resnet50, dinov2_vits14, dinov2_vitl14
+        self.backbone_name: str = "dinov2_vitb14"    # resnet50, dinov2_vitb14, dinov3_vitb16
         self.unfreeze_n_blocks: int = 2              # number of blocks to unfreeze in the backbone
+        self.dino_weights: str | None = None         # optional torch.hub weights name for dino backbones
         
         ## BoQ config:
         self.channel_proj: int = 512
@@ -72,6 +74,11 @@ class HyperParams:
         self.lr_mul: float = 0.1
         self.milestones: list = [10, 20]
         self.num_workers: int = 8
+        self.top1_monitor: str = "pitts30k-val/R@1"  # metric used for checkpointing/early stopping
+        self.early_stop_patience: int = 15            # stop if no Top-1 improvement for N val epochs
+        self.early_stop_min_delta: float = 0.0       # minimum improvement to qualify as progress
+        self.enable_early_stopping: bool = True
+        self.eval_report_dir: str = "./logs/eval_reports"
         
         ## misc
         self.silent: bool = False            # disable console output
@@ -83,10 +90,26 @@ def train(hparams, dev_mode=False):
     
     # Instantiate the backbone and define the image size for training and validation
     if "dinov2" in hparams.backbone_name:
-        backbone = DinoV2(backbone_name=hparams.backbone_name, unfreeze_n_blocks=hparams.unfreeze_n_blocks)
+        backbone = DinoV2(
+            backbone_name=hparams.backbone_name,
+            unfreeze_n_blocks=hparams.unfreeze_n_blocks,
+            weights=hparams.dino_weights,
+        )
         train_img_size = (224, 224)
         val_img_size = (322, 322)
         hparams.backbone_name = backbone.backbone_name # in case the user passed dinov2 without the version
+        hparams.train_img_size = train_img_size
+        hparams.val_img_size = val_img_size
+
+    elif "dinov3" in hparams.backbone_name:
+        backbone = DinoV3(
+            backbone_name=hparams.backbone_name,
+            unfreeze_n_blocks=hparams.unfreeze_n_blocks,
+            weights=hparams.dino_weights,
+        )
+        train_img_size = (224, 224)
+        val_img_size = (336, 336)
+        hparams.backbone_name = backbone.backbone_name
         hparams.train_img_size = train_img_size
         hparams.val_img_size = val_img_size
         
@@ -122,11 +145,40 @@ def train(hparams, dev_mode=False):
         silent=hparams.silent,
         recall_ks=hparams.recall_ks,
     )
+    # 冻结检查函数，防止“以为冻结了但其实没冻结
+    def print_trainable_parameters(model):
+        total = 0
+        trainable = 0
+
+        print("\n========== Trainable Parameter Check ==========")
+        for name, param in model.named_parameters():
+            numel = param.numel()
+            total += numel
+            if param.requires_grad:
+                trainable += numel
+                print(f"[Trainable] {name}: {tuple(param.shape)}")
+
+        print(f"Total params:     {total / 1e6:.2f} M")
+        print(f"Trainable params: {trainable / 1e6:.2f} M")
+        print(f"Trainable ratio:  {100 * trainable / total:.4f}%")
+        print("================================================\n")
+
+
+    def assert_backbone_frozen(backbone):
+        for name, param in backbone.named_parameters():
+            if param.requires_grad:
+                raise RuntimeError(
+                    f"Backbone is not fully frozen! Trainable parameter found: {name}"
+                )
+        print("[OK] Backbone is fully frozen. Only aggregator should be trainable.")
     
     if hparams.compile:
         model = torch.compile(model)
     
-    
+    if "dinov3" in hparams.backbone_name and hparams.unfreeze_n_blocks == 0:
+        assert_backbone_frozen(backbone)
+
+    print_trainable_parameters(model)
     
     # Define the datamodule for handling training and validation datasets
     datamodule = VPRDataModule(
@@ -169,19 +221,34 @@ def train(hparams, dev_mode=False):
     #     mode="max",
     # )
     checkpointing = callbacks.ModelCheckpoint(
-        monitor="pitts30k-val/R@1",  # <==== monitor the Recall@1 on the msls-val dataset
+        monitor=hparams.top1_monitor,  # monitor Top-1 recall
         filename="epoch[{epoch:02d}]_R@1[{pitts30k-val/R@1:.4f}]_R@5[{pitts30k-val/R@5:.4f}]_R@10[{pitts30k-val/R@10:.4f}]_R@20[{pitts30k-val/R@20:.4f}]",
         auto_insert_metric_name=False,
         save_weights_only=False,
         save_top_k=3,
+        save_last=True,  # always keep a last.ckpt for resume
         mode="max",
     )
+# 训练会在“指定轮次内 Top-1 无提升”时提前停止，核心是 EarlyStopping 监控 pitts30k-val/R@1（默认）
+    early_stopping = None
+    if hparams.enable_early_stopping and hparams.early_stop_patience > 0:
+        early_stopping = callbacks.EarlyStopping(
+            monitor=hparams.top1_monitor,
+            mode="max",
+            patience=hparams.early_stop_patience,
+            min_delta=hparams.early_stop_min_delta,
+            strict=False,
+            check_on_train_epoch_end=False,
+            verbose=not hparams.silent,
+        )
     
     # Define the progress bar callback
     program_bar = callbacks.RichProgressBar()
     
     # Lightning Trainer will take a list of callbacks
     callback_list = [checkpointing]
+    if early_stopping is not None:
+        callback_list.append(early_stopping)
     if not hparams.silent:
         callback_list.append(program_bar)
     
@@ -201,6 +268,20 @@ def train(hparams, dev_mode=False):
         enable_progress_bar=not hparams.silent,
         # accumulate_grad_batches=4,
     )
+
+    def _write_eval_report(requested_ckpt_path: str, resolved_ckpt_path: str):
+        dataset_recalls = getattr(model, "last_test_recalls", {}) or {}
+        report = build_eval_report(
+            ckpt_path=resolved_ckpt_path,
+            requested_ckpt_path=requested_ckpt_path,
+            dataset_recalls=dataset_recalls,
+            hparams_dict=hparams.__dict__,
+            cli_args_dict=vars(args),
+        )
+        json_path, md_path = save_eval_report(report, report_dir=hparams.eval_report_dir)
+        if not hparams.silent:
+            print(f"[EvalReport] JSON: {json_path}")
+            print(f"[EvalReport] Markdown: {md_path}")
     
     # # Train the model
     # trainer.fit(model=model, datamodule=datamodule)
@@ -212,14 +293,23 @@ def train(hparams, dev_mode=False):
             raise ValueError("Please provide --ckpt_path when using --test_only")
         print(f"Starting testing using checkpoint: {args.ckpt_path}")
         trainer.test(model, datamodule=datamodule, ckpt_path=args.ckpt_path)
+        _write_eval_report(
+            requested_ckpt_path=args.ckpt_path,
+            resolved_ckpt_path=args.ckpt_path,
+        )
         
     else:
         # 6. 正常训练模式
-        trainer.fit(model=model, datamodule=datamodule)
+        trainer.fit(model=model, datamodule=datamodule, ckpt_path=args.resume_ckpt)
         
         # 训练结束后，加载最好的模型进行测试
         print("Training finished. Starting testing with best checkpoint...")
         trainer.test(model, datamodule=datamodule, ckpt_path="best")
+        best_path = checkpointing.best_model_path if checkpointing.best_model_path else "best"
+        _write_eval_report(
+            requested_ckpt_path="best",
+            resolved_ckpt_path=best_path,
+        )
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Train parameters")
@@ -238,9 +328,16 @@ def parse_args():
     parser.add_argument('--warmup', type=int, help='Number of warmup epochs')
     parser.add_argument("--nw",     type=int, help="Numbers of workers.")
 
-    parser.add_argument('--backbone',   type=str, help='Backbone model name [resnet50, dinov2]')
+    parser.add_argument('--backbone',   type=str, help='Backbone model name [resnet50, dinov2_vitb14, dinov3_vitb16]')
+    parser.add_argument('--dino_weights', type=str, default=None, help='Optional torch.hub weights argument for dino backbones.')
     parser.add_argument('--unfreeze_n', type=int, help='Number of blocks to unfreeze in the backbone.')
     parser.add_argument("--dim",        type=int, help="Output dimensionality.")
+    parser.add_argument("--monitor", type=str, default=None, help="Metric name to monitor for checkpoint/early stop, e.g. pitts30k-val/R@1")
+    parser.add_argument("--es_patience", type=int, default=None, help="Early stop patience in epochs with no Top-1 improvement.")
+    parser.add_argument("--es_min_delta", type=float, default=None, help="Minimum Top-1 improvement to reset early-stop patience.")
+    parser.add_argument("--es_disable", action="store_true", help="Disable early stopping.")
+    parser.add_argument("--eval_report_dir", type=str, default=None, help="Directory to save evaluation reports (JSON + Markdown + index).")
+    parser.add_argument("--resume_ckpt", type=str, default=None, help="Checkpoint path to resume training, e.g. .../checkpoints/last.ckpt")
      # 7. [新增] 命令行参数
     parser.add_argument("--test_only", action="store_true", help="Skip training and run testing only.")
     parser.add_argument("--ckpt_path", type=str, default=None, help="Path to checkpoint for testing.")
@@ -251,29 +348,41 @@ if __name__ == "__main__":
     args = parse_args()
     hparams = HyperParams()
     
-    if args.seed:
+    if args.seed is not None:
         hparams.seed = args.seed
     if args.compile:
         hparams.compile = True
     if args.silent:
         hparams.silent = True
-    if args.bs:
+    if args.bs is not None:
         hparams.batch_size = args.bs
-    if args.lr:
+    if args.lr is not None:
         hparams.lr = args.lr
-    if args.wd:
+    if args.wd is not None:
         hparams.weight_decay = args.wd
-    if args.epochs:
+    if args.epochs is not None:
         hparams.max_epochs = args.epochs
-    if args.warmup:
+    if args.warmup is not None:
         hparams.warmup_epochs = args.warmup
-    if args.nw:
+    if args.nw is not None:
         hparams.num_workers = args.nw
     if args.backbone:
         hparams.backbone_name = args.backbone
-    if args.unfreeze_n:
+    if args.unfreeze_n is not None:
         hparams.unfreeze_n_blocks = args.unfreeze_n
-    if args.dim:
+    if args.dim is not None:
         hparams.output_dim = args.dim
+    if args.dino_weights:
+        hparams.dino_weights = args.dino_weights
+    if args.monitor:
+        hparams.top1_monitor = args.monitor
+    if args.es_patience is not None:
+        hparams.early_stop_patience = args.es_patience  #（小于该提升不算进步）
+    if args.es_min_delta is not None:
+        hparams.early_stop_min_delta = args.es_min_delta
+    if args.es_disable:
+        hparams.enable_early_stopping = False  #关闭早停（只按 max_epochs 跑）
+    if args.eval_report_dir:
+        hparams.eval_report_dir = args.eval_report_dir
     
     train(hparams, dev_mode=args.dev)
