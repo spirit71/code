@@ -7,6 +7,8 @@
 # ----------------------------------------------------------------------------
 
 import argparse
+import sys
+from pathlib import Path
 import torch
 from lightning.pytorch import callbacks
 from lightning.pytorch import Trainer, seed_everything
@@ -67,18 +69,20 @@ class HyperParams:
         ## Training config:
         self.batch_size: int = 128           # batch size is the number of places per batch
         self.img_per_place: int = 4          # number of images per place
-        self.max_epochs: int = 40
-        self.warmup_epochs: int = 10    # number of linear warmup epochs (not iterations)
+        self.max_epochs: int = 60
+        self.warmup_epochs: int =5    # number of linear warmup epochs (not iterations)
         self.lr: float = 1e-4                # learning rate
         self.weight_decay: float = 1e-4
-        self.lr_mul: float = 0.1
-        self.milestones: list = [10, 20]
+        self.lr_mul: float = 0.1  #0.1 0.25 0.5
+        self.scheduler_gamma = 0.1
+        self.milestones: list = [20, 30]
         self.num_workers: int = 8
         self.top1_monitor: str = "pitts30k-val/R@1"  # metric used for checkpointing/early stopping
         self.early_stop_patience: int = 15            # stop if no Top-1 improvement for N val epochs
         self.early_stop_min_delta: float = 0.0       # minimum improvement to qualify as progress
         self.enable_early_stopping: bool = True
         self.eval_report_dir: str = "./logs/eval_reports"
+        self.enable_console_file_log: bool = True  # mirror console stdout/stderr to log file 将控制台输出/错误输出镜像到日志文件中
         
         ## misc
         self.silent: bool = False            # disable console output
@@ -205,6 +209,49 @@ def train(hparams, dev_mode=False):
         name=f"{hparams.backbone_name}",
         default_hp_metric=False
     )
+
+    class _StreamTee:
+        def __init__(self, stream, file_obj):
+            self.stream = stream
+            self.file_obj = file_obj
+
+        def write(self, data):
+            self.stream.write(data)
+            self.file_obj.write(data)
+
+        def flush(self):
+            self.stream.flush()
+            self.file_obj.flush()
+
+        def isatty(self):
+            return self.stream.isatty()
+
+        def __getattr__(self, name):
+            return getattr(self.stream, name)
+
+    def _setup_console_file_logging():
+        if not hparams.enable_console_file_log:
+            return None, None
+        log_dir = Path(tensorboard_logger.log_dir)
+        log_dir.mkdir(parents=True, exist_ok=True)
+        console_log_path = log_dir / "console.log"
+        file_obj = open(str(console_log_path), "a", encoding="utf-8", buffering=1)
+        orig_stdout, orig_stderr = sys.stdout, sys.stderr
+        sys.stdout = _StreamTee(orig_stdout, file_obj)
+        sys.stderr = _StreamTee(orig_stderr, file_obj)
+        print(f"[ConsoleLog] Mirroring console output to: {str(console_log_path)}")
+
+        def _restore():
+            try:
+                sys.stdout.flush()
+                sys.stderr.flush()
+            except Exception:
+                pass
+            sys.stdout = orig_stdout
+            sys.stderr = orig_stderr
+            file_obj.close()
+
+        return _restore, str(console_log_path)
     
     # let's save all the hyperparameters to the the log file
     # this will be saved in the logs folder
@@ -286,30 +333,35 @@ def train(hparams, dev_mode=False):
     # # Train the model
     # trainer.fit(model=model, datamodule=datamodule)
 # --- Execution Logic (Train or Test) ---
-    
-    if args.test_only:
-        # 5. 纯测试模式
-        if not args.ckpt_path:
-            raise ValueError("Please provide --ckpt_path when using --test_only")
-        print(f"Starting testing using checkpoint: {args.ckpt_path}")
-        trainer.test(model, datamodule=datamodule, ckpt_path=args.ckpt_path)
-        _write_eval_report(
-            requested_ckpt_path=args.ckpt_path,
-            resolved_ckpt_path=args.ckpt_path,
-        )
-        
-    else:
-        # 6. 正常训练模式
-        trainer.fit(model=model, datamodule=datamodule, ckpt_path=args.resume_ckpt)
-        
-        # 训练结束后，加载最好的模型进行测试
-        print("Training finished. Starting testing with best checkpoint...")
-        trainer.test(model, datamodule=datamodule, ckpt_path="best")
-        best_path = checkpointing.best_model_path if checkpointing.best_model_path else "best"
-        _write_eval_report(
-            requested_ckpt_path="best",
-            resolved_ckpt_path=best_path,
-        )
+
+    restore_console, _ = _setup_console_file_logging()
+    try:
+        if args.test_only:
+            # 5. 纯测试模式
+            if not args.ckpt_path:
+                raise ValueError("Please provide --ckpt_path when using --test_only")
+            print(f"Starting testing using checkpoint: {args.ckpt_path}")
+            trainer.test(model, datamodule=datamodule, ckpt_path=args.ckpt_path)
+            _write_eval_report(
+                requested_ckpt_path=args.ckpt_path,
+                resolved_ckpt_path=args.ckpt_path,
+            )
+            
+        else:
+            # 6. 正常训练模式
+            trainer.fit(model=model, datamodule=datamodule, ckpt_path=args.resume_ckpt)
+            
+            # 训练结束后，加载最好的模型进行测试
+            print("Training finished. Starting testing with best checkpoint...")
+            trainer.test(model, datamodule=datamodule, ckpt_path="best")
+            best_path = checkpointing.best_model_path if checkpointing.best_model_path else "best"
+            _write_eval_report(
+                requested_ckpt_path="best",
+                resolved_ckpt_path=best_path,
+            )
+    finally:
+        if restore_console is not None:
+            restore_console()
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Train parameters")
@@ -337,6 +389,7 @@ def parse_args():
     parser.add_argument("--es_min_delta", type=float, default=None, help="Minimum Top-1 improvement to reset early-stop patience.")
     parser.add_argument("--es_disable", action="store_true", help="Disable early stopping.")
     parser.add_argument("--eval_report_dir", type=str, default=None, help="Directory to save evaluation reports (JSON + Markdown + index).")
+    parser.add_argument("--no_console_file_log", action="store_true", help="Disable writing console output to logs/<run>/<version>/console.log")
     parser.add_argument("--resume_ckpt", type=str, default=None, help="Checkpoint path to resume training, e.g. .../checkpoints/last.ckpt")
      # 7. [新增] 命令行参数
     parser.add_argument("--test_only", action="store_true", help="Skip training and run testing only.")
@@ -384,5 +437,7 @@ if __name__ == "__main__":
         hparams.enable_early_stopping = False  #关闭早停（只按 max_epochs 跑）
     if args.eval_report_dir:
         hparams.eval_report_dir = args.eval_report_dir
+    if args.no_console_file_log:
+        hparams.enable_console_file_log = False
     
     train(hparams, dev_mode=args.dev)

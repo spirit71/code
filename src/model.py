@@ -18,7 +18,8 @@ class BoQModel(L.LightningModule):
             backbone, 
             aggregator,
             lr=1e-4,
-            lr_mul=0.1,
+            lr_mul=0.1,  
+            scheduler_gamma=0.1,
             weight_decay=1e-3,
             warmup_epochs=10,
             milestones=[10, 20],
@@ -30,6 +31,7 @@ class BoQModel(L.LightningModule):
         self.aggregator = aggregator
         self.lr = lr
         self.lr_mul = lr_mul
+        self.scheduler_gamma = scheduler_gamma
         self.weight_decay = weight_decay
         self.warmup_epochs = warmup_epochs
         self.milestones = milestones
@@ -43,12 +45,12 @@ class BoQModel(L.LightningModule):
 
     def configure_optimizers(self):
         optimizer_params = [
-            {"params": self.backbone.parameters(),   "lr": self.lr* self.lr_mul, "weight_decay": self.weight_decay},
+            {"params": self.backbone.parameters(),   "lr": self.lr, "weight_decay": self.weight_decay},
             {"params": self.aggregator.parameters(), "lr": self.lr, "weight_decay": self.weight_decay},
         ]
         optimizer = torch.optim.AdamW(optimizer_params)
         scheduler = torch.optim.lr_scheduler.MultiStepLR(
-            optimizer, milestones=self.milestones, gamma=self.lr_mul
+            optimizer, milestones=self.milestones, gamma=self.scheduler_gamma
         )    
         return [optimizer], [scheduler]
     
