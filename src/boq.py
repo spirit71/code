@@ -7,13 +7,50 @@
 # ----------------------------------------------------------------------------
 
 import torch
-
+import torch.nn as nn
+import torch.nn.functional as F
 class BoQBlock(torch.nn.Module):
-    def __init__(self, in_dim, num_queries, nheads=8):
+    # Shared Query + Routed Delta Query Bank.
+
+    # 原始 BoQ:
+    #     q = shared_q
+
+    # 本模块:
+    #     q = shared_q + alpha * routed_delta_q
+
+    # routed_delta_q = sum_m gate_m(x) * delta_bank_m
+
+    # 这样设计的好处：
+    # 1. shared_q 保留原始 BoQ 的通用 query；
+    # 2. routed_delta_q 学不同域/场景下的 query 修正；
+    # 3. alpha 初始化为 0，训练初期等价于原始 BoQ，更稳。
+    def __init__(self, in_dim, num_queries, nheads=8,num_banks = 4,
+        router_hidden_ratio=4,
+        use_balance_loss=True,delta_init_scale: float = 0.02,):
         super(BoQBlock, self).__init__()
         
         self.encoder = torch.nn.TransformerEncoderLayer(d_model=in_dim, nhead=nheads, dim_feedforward=4*in_dim, batch_first=True, dropout=0.)
-        self.queries = torch.nn.Parameter(torch.randn(1, num_queries, in_dim))
+        # shared query: 对应原始 BoQ 的固定 learnable queries
+        self.shared_queries = torch.nn.Parameter(
+            torch.randn(1, num_queries, in_dim) * 0.02
+        )
+        # delta query banks: domain-specific / context-specific query correction
+        # shape: [M, K, C]
+        self.delta_query_banks = nn.Parameter(
+            torch.randn(num_banks, num_queries, in_dim) * delta_init_scale
+        )
+        # alpha 控制 routed delta 的强度
+        # 初始化为 0：开始时 q = shared_q，等价于原始 BoQ
+        self.delta_scale = nn.Parameter(torch.zeros(1))
+        hidden_dim = max(in_dim // router_hidden_ratio, 64)
+
+        # Image-level router: [B, C] -> [B, M]
+        self.router = torch.nn.Sequential(
+            torch.nn.LayerNorm(in_dim),
+            torch.nn.Linear(in_dim, hidden_dim),
+            torch.nn.ReLU(inplace=True),
+            torch.nn.Linear(hidden_dim, num_banks),
+        )
         
         # the following two lines are used during training only, you can cache their output in eval.
         self.self_attn = torch.nn.MultiheadAttention(in_dim, num_heads=nheads, batch_first=True)
@@ -26,9 +63,26 @@ class BoQBlock(torch.nn.Module):
 
     def forward(self, x):
         B = x.size(0)
-        x = self.encoder(x)
+        x = self.encoder(x) ##[512, 256, 512]  ->
+        # 2. image-level context
+        z = x.mean(dim=1)                    # [B, C]
+        # 3. router 预测每张图像的 bank 权重
+        gate_logits = self.router(z)             # [B, M]
+        gate = torch.softmax(gate_logits, dim=-1)  # [B, M]
+
+        shared_q = self.shared_queries.repeat(B, 1, 1)
+        # 4. soft routing 得到当前图像专属 queries
+        routed_delta_q = torch.einsum(
+            "bm,mkc->bkc",
+            gate,
+            self.delta_query_banks,
+        )  # [B, K, C]
+        #添加残差保持稳定
+        q = shared_q + self.delta_scale * routed_delta_q  # [B, K, C]
+
+        # 5. query self-attention，保持原逻辑
         
-        q = self.queries.repeat(B, 1, 1)
+        # q = self.queries.repeat(B, 1, 1)
         
         # the following two lines are used during training.
         # for stability purposes 
@@ -38,18 +92,55 @@ class BoQBlock(torch.nn.Module):
         
         out, attn = self.cross_attn(q, x, x)        
         out = self.norm_out(out)
-        return x, out, attn.detach()
+         # 7. balance loss，防止所有样本都走同一个 bank
+        aux = {
+            "gate": gate,
+            "gate_logits": gate_logits,
+        }
+
+        return x, out, attn.detach(), aux
+    
 
 
 class BoQ(torch.nn.Module):
-    def __init__(self, in_channels=1024, proj_channels=512, num_queries=32, num_layers=2, row_dim=32):
+    def __init__(self, in_channels=1024, proj_channels=512, num_queries=32, num_layers=2, row_dim=32,use_domain_routing=True,num_query_banks=4,routing_type="delta",):
         super().__init__()
+        self.use_domain_routing = use_domain_routing
+        self.num_query_banks = num_query_banks
+        self.routing_type = routing_type
         self.proj_c = torch.nn.Conv2d(in_channels, proj_channels, kernel_size=3, padding=1)
         self.norm_input = torch.nn.LayerNorm(proj_channels)
         
         in_dim = proj_channels
-        self.boqs = torch.nn.ModuleList([
-            BoQBlock(in_dim, num_queries, nheads=in_dim//64) for _ in range(num_layers)])
+        # self.boqs = torch.nn.ModuleList([
+        #     BoQBlock(in_dim, num_queries, nheads=in_dim//64) for _ in range(num_layers)])
+        nheads = in_dim // 64
+
+        if use_domain_routing:
+            if routing_type == "delta":
+                block_cls = BoQBlock
+            else:
+                raise ValueError(f"Unsupported routing_type: {routing_type}")
+
+            self.boqs = nn.ModuleList([
+                block_cls(
+                    in_dim=in_dim,
+                    num_queries=num_queries,
+                    nheads=nheads,
+                    num_banks=num_query_banks,
+                )
+                for _ in range(num_layers)
+            ])
+        else:
+            self.boqs = nn.ModuleList([
+                BoQBlock(
+                    in_dim=in_dim,
+                    num_queries=num_queries,
+                    nheads=nheads,
+                )
+                for _ in range(num_layers)
+            ])
+
         
         self.fc = torch.nn.Linear(num_layers*num_queries, row_dim)
         
@@ -61,13 +152,24 @@ class BoQ(torch.nn.Module):
         
         outs = []
         attns = []
-        for i in range(len(self.boqs)):
-            x, out, attn = self.boqs[i](x)
+        routing_aux = []
+        # for i in range(len(self.boqs)):
+        #     x, out, attn = self.boqs[i](x)
+        #     outs.append(out)
+        #     attns.append(attn)
+        for block in self.boqs:
+            if self.use_domain_routing:
+                x, out, attn, aux = block(x)
+                routing_aux.append(aux)
+            else:
+                x, out, attn = block(x)
             outs.append(out)
             attns.append(attn)
 
-        out = torch.cat(outs, dim=1)
-        out = self.fc(out.permute(0, 2, 1))
-        out = out.flatten(1)
+        out = torch.cat(outs, dim=1)# [B, L*K, C]
+        out = self.fc(out.permute(0, 2, 1))# [B, C, row_dim]
+        out = out.flatten(1) # [B, C*row_dim]
         out = torch.nn.functional.normalize(out, p=2, dim=-1)
+        if self.use_domain_routing:
+            return out, attns, routing_aux
         return out, attns

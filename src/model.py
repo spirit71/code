@@ -17,6 +17,7 @@ class BoQModel(L.LightningModule):
             self, 
             backbone, 
             aggregator,
+            routing_balance_weight=0.001,
             lr=1e-4,
             lr_mul=0.1,  
             scheduler_gamma=0.1,
@@ -24,11 +25,13 @@ class BoQModel(L.LightningModule):
             warmup_epochs=10,
             milestones=[10, 20],
             silent=False,
-            recall_ks=[1, 5, 10, 20]  # [修改] 增加默认的 Recall K 值列表
+            recall_ks=[1, 5, 10, 20] # [修改] 增加默认的 Recall K 值列表
+
         ):
         super().__init__()
         self.backbone = backbone
         self.aggregator = aggregator
+        self.routing_balance_weight = routing_balance_weight
         self.lr = lr
         self.lr_mul = lr_mul
         self.scheduler_gamma = scheduler_gamma
@@ -42,10 +45,11 @@ class BoQModel(L.LightningModule):
         self.ms_loss = losses.MultiSimilarityLoss(alpha=1, beta=50, base=0.)
         self.ms_miner = miners.MultiSimilarityMiner(epsilon=0.1)
         self.last_test_recalls = {}
+        self.routing_balance_weight = routing_balance_weight
 
     def configure_optimizers(self):
         optimizer_params = [
-            {"params": self.backbone.parameters(),   "lr": self.lr, "weight_decay": self.weight_decay},
+            {"params": self.backbone.parameters(),   "lr": self.lr*self.lr_mul, "weight_decay": self.weight_decay},
             {"params": self.aggregator.parameters(), "lr": self.lr, "weight_decay": self.weight_decay},
         ]
         optimizer = torch.optim.AdamW(optimizer_params)
@@ -75,11 +79,16 @@ class BoQModel(L.LightningModule):
         loss =  self.ms_loss(descriptors, labels, mined_pairs)
         return loss
     
+    # def forward(self, x):
+    #     x = self.backbone(x)
+    #     x, attns = self.aggregator(x)
+    #     return x, attns
     def forward(self, x):
         x = self.backbone(x)
-        x, attns = self.aggregator(x)
-        return x, attns
-    
+        out = self.aggregator(x)
+        descriptors, attns, routing_aux = self._unpack_forward_output(out)
+        return descriptors, attns, routing_aux
+        
     def training_step(self, batch, batch_idx):
         images, labels = batch
         # images.shape is (P, K, C, H, W) with P: number of places, K: number of views per place
@@ -87,14 +96,37 @@ class BoQModel(L.LightningModule):
         images = images.flatten(0, 1) # P*K, C, H, W 
         labels = labels.flatten() # P*K
         
-        # forward pass
-        descriptors, attentions = self(images)
-        # compute loss
-        loss = self.compute_loss(descriptors, labels)
-        # self.log("loss", loss, prog_bar=True, logger=True)
-        # ✅ 新增：记录 epoch 信息
-        self.log('train/loss', loss, on_step=True, on_epoch=True, prog_bar=True)
-        self.log('train/epoch', float(self.current_epoch), on_step=False, on_epoch=True, prog_bar=False)
+        # # forward pass
+        # descriptors, attentions = self(images)
+        # # compute loss
+        # loss = self.compute_loss(descriptors, labels)
+        descriptors, attentions, routing_aux = self(images)
+        loss_main = self.compute_loss(descriptors, labels)
+        loss = loss_main
+
+        if routing_aux is not None and self.routing_balance_weight > 0:
+            routing_loss_out = self.compute_routing_balance_loss(routing_aux)
+            if routing_loss_out is not None:
+                loss_balance, gate_entropy = routing_loss_out
+                loss = loss + self.routing_balance_weight * loss_balance
+
+                self.log("loss/routing_balance", loss_balance, prog_bar=False, logger=True)
+                self.log("router/gate_entropy", gate_entropy, prog_bar=False, logger=True)
+
+                # 记录每层 delta_scale
+                for layer_idx, aux in enumerate(routing_aux):
+                    if "delta_scale" in aux:
+                        self.log(
+                            f"router/layer{layer_idx}_delta_scale",
+                            aux["delta_scale"].float(),
+                            prog_bar=False,
+                            logger=True,
+                        )
+
+        self.log("loss", loss, prog_bar=True, logger=True)
+        # # ✅ 新增：记录 epoch 信息
+        # self.log('train/loss', loss, on_step=True, on_epoch=True, prog_bar=True)
+        # self.log('train/epoch', float(self.current_epoch), on_step=False, on_epoch=True, prog_bar=False)
         return loss 
 
     def on_train_epoch_end(self):
@@ -115,11 +147,13 @@ class BoQModel(L.LightningModule):
         if images.ndim == 5:
             bsz, ncrops, c, h, w = images.shape
             images = images.view(bsz * ncrops, c, h, w)
-            descriptors, attentions = self(images)
+            # descriptors, attentions = self(images)
+            descriptors, attentions, routing_aux = self(images)
             descriptors = descriptors.view(bsz, ncrops, -1).mean(dim=1)
         else:
-            descriptors, attentions = self(images)
-        descriptors = descriptors.detach().cpu()#.numpy()
+            # descriptors, attentions = self(images)
+            descriptors, attentions, routing_aux = self(images)
+            descriptors = descriptors.detach().cpu()#.numpy()
         
         if dataloader_idx not in self.validation_outputs:
             # keep in mind that we might have multiple validation dataloaders
@@ -186,10 +220,12 @@ class BoQModel(L.LightningModule):
         if images.ndim == 5:
             bsz, ncrops, c, h, w = images.shape
             images = images.view(bsz * ncrops, c, h, w)
-            descriptors, attentions = self(images)
+            # descriptors, attentions = self(images)
+            descriptors, attentions, routing_aux = self(images)
             descriptors = descriptors.view(bsz, ncrops, -1).mean(dim=1)
         else:
-            descriptors, attentions = self(images)
+            # descriptors, attentions = self(images)
+            descriptors, attentions, routing_aux = self(images)
         descriptors = descriptors.detach().cpu()
         
         if dataloader_idx not in self.test_outputs:
@@ -246,3 +282,56 @@ class BoQModel(L.LightningModule):
         
         # 清理内存
         self.test_outputs.clear()
+    # balance loss 函数
+    def compute_routing_balance_loss(self, routing_aux):
+        """
+        防止 router collapse 到某一个 bank。
+
+        routing_aux: list[dict]
+            每层一个 dict，其中 aux["gate"] shape 为 [B, M]
+        """
+        if routing_aux is None or len(routing_aux) == 0:
+            return None
+
+        losses = []
+        entropies = []
+
+        for aux in routing_aux:
+            gate = aux["gate"]  # [B, M]
+
+            # batch 平均使用率
+            mean_gate = gate.mean(dim=0)  # [M]
+            num_banks = mean_gate.numel()
+
+            uniform = torch.full_like(mean_gate, 1.0 / num_banks)
+
+            # KL(mean_gate || uniform)，越小表示越均衡
+            kl = torch.sum(
+                mean_gate * torch.log((mean_gate + 1e-8) / (uniform + 1e-8))
+            )
+            losses.append(kl)
+
+            # 记录 gate entropy，观察 router 是否太确定/太平均
+            entropy = -(gate * torch.log(gate + 1e-8)).sum(dim=-1).mean()
+            entropies.append(entropy)
+
+        balance_loss = torch.stack(losses).mean()
+        gate_entropy = torch.stack(entropies).mean()
+
+        return balance_loss, gate_entropy
+
+    def _unpack_forward_output(self, out):
+        """
+        兼容两种 aggregator 输出：
+        1. 原始 BoQ: (descriptors, attns)
+        2. Routed BoQ: (descriptors, attns, routing_aux)
+        """
+        if isinstance(out, tuple) and len(out) == 3:
+            descriptors, attns, routing_aux = out
+        elif isinstance(out, tuple) and len(out) == 2:
+            descriptors, attns = out
+            routing_aux = None
+        else:
+            raise RuntimeError(f"Unexpected model output format: {type(out)}")
+
+        return descriptors, attns, routing_aux

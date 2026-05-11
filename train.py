@@ -83,7 +83,11 @@ class HyperParams:
         self.enable_early_stopping: bool = True
         self.eval_report_dir: str = "./logs/eval_reports"
         self.enable_console_file_log: bool = True  # mirror console stdout/stderr to log file 将控制台输出/错误输出镜像到日志文件中
-        
+        self.use_domain_routing = True
+        self.num_query_banks = 4
+        self.routing_balance_weight = 0.001
+        self.routing_type= "delta"
+
         ## misc
         self.silent: bool = False            # disable console output
         self.compile: bool = False           # compile the model using torch.compile() [experimental]
@@ -135,6 +139,9 @@ def train(hparams, dev_mode=False):
         num_queries=hparams.num_queries,
         num_layers=hparams.num_layers,
         row_dim=hparams.output_dim//hparams.channel_proj,
+        use_domain_routing=hparams.use_domain_routing,
+        num_query_banks=hparams.num_query_banks,
+        routing_type=hparams.routing_type,
     )
     
     # Define the entire Lightning model for training and validation
@@ -148,6 +155,7 @@ def train(hparams, dev_mode=False):
         milestones=hparams.milestones,
         silent=hparams.silent,
         recall_ks=hparams.recall_ks,
+        routing_balance_weight=hparams.routing_balance_weight,
     )
     # 冻结检查函数，防止“以为冻结了但其实没冻结
     def print_trainable_parameters(model):
@@ -394,6 +402,39 @@ def parse_args():
      # 7. [新增] 命令行参数
     parser.add_argument("--test_only", action="store_true", help="Skip training and run testing only.")
     parser.add_argument("--ckpt_path", type=str, default=None, help="Path to checkpoint for testing.")
+    parser.add_argument(
+        "--use_domain_routing",
+        action="store_true",
+        help="Enable domain-routed query banks in BoQ."
+    )
+
+    parser.add_argument(
+        "--num_query_banks",
+        type=int,
+        default=None,
+        help="Number of query banks for domain-routed BoQ."
+    )
+    parser.add_argument(
+    "--routing_type",
+    type=str,
+    default=None,
+    choices=["delta"],
+    help="Routing type. Currently support: delta."
+    )
+
+    parser.add_argument(
+        "--routing_balance_weight",
+        type=float,
+        default=None,
+        help="Weight for routing balance regularization loss."
+    )
+    parser.add_argument(
+    "--milestones",
+    type=int,
+    nargs="+",
+    default=None,
+    help="Milestones for MultiStepLR, e.g. --milestones 20 30"
+    )
     return parser.parse_args()
 
 
@@ -439,5 +480,17 @@ if __name__ == "__main__":
         hparams.eval_report_dir = args.eval_report_dir
     if args.no_console_file_log:
         hparams.enable_console_file_log = False
+    if args.use_domain_routing is not None:
+        hparams.use_domain_routing = True
+
+    if args.num_query_banks is not None:
+        hparams.num_query_banks = args.num_query_banks
+    if args.routing_type is not None:
+        hparams.routing_type = args.routing_type
+
+    if args.routing_balance_weight is not None:
+        hparams.routing_balance_weight = args.routing_balance_weight
+    if args.milestones is not None:
+        hparams.milestones = args.milestones
     
     train(hparams, dev_mode=args.dev)
