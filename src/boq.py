@@ -26,14 +26,21 @@ class BoQBlock(torch.nn.Module):
     # 3. alpha 初始化为 0，训练初期等价于原始 BoQ，更稳。
     def __init__(self, in_dim, num_queries, nheads=8,num_banks = 4,
         router_hidden_ratio=4,
-        use_balance_loss=True,delta_init_scale: float = 0.02,):
+        use_balance_loss=True,delta_init_scale: float = 0.02,router_temperature=0.7, # 0.7 0.5
+        max_delta_scale=0.2,):
         super(BoQBlock, self).__init__()
-        
+        self.in_dim = in_dim
+        self.num_queries = num_queries
+        self.num_banks = num_banks
+        self.router_temperature = router_temperature
+        self.max_delta_scale = max_delta_scale
         self.encoder = torch.nn.TransformerEncoderLayer(d_model=in_dim, nhead=nheads, dim_feedforward=4*in_dim, batch_first=True, dropout=0.)
         # shared query: 对应原始 BoQ 的固定 learnable queries
         self.shared_queries = torch.nn.Parameter(
             torch.randn(1, num_queries, in_dim) * 0.02
         )
+        # raw 参数，不直接使用；通过 tanh 映射到有限范围
+        self.raw_delta_scale = torch.nn.Parameter(torch.zeros(1))
         # delta query banks: domain-specific / context-specific query correction
         # shape: [M, K, C]
         self.delta_query_banks = nn.Parameter(
@@ -41,7 +48,7 @@ class BoQBlock(torch.nn.Module):
         )
         # alpha 控制 routed delta 的强度
         # 初始化为 0：开始时 q = shared_q，等价于原始 BoQ
-        self.delta_scale = nn.Parameter(torch.zeros(1))
+        # self.delta_scale = nn.Parameter(torch.zeros(1))
         hidden_dim = max(in_dim // router_hidden_ratio, 64)
 
         # Image-level router: [B, C] -> [B, M]
@@ -68,7 +75,11 @@ class BoQBlock(torch.nn.Module):
         z = x.mean(dim=1)                    # [B, C]
         # 3. router 预测每张图像的 bank 权重
         gate_logits = self.router(z)             # [B, M]
-        gate = torch.softmax(gate_logits, dim=-1)  # [B, M]
+        # temperature < 1 会让 softmax 更尖锐
+        gate = torch.softmax(
+            gate_logits / self.router_temperature,
+            dim=-1,
+        )
 
         shared_q = self.shared_queries.repeat(B, 1, 1)
         # 4. soft routing 得到当前图像专属 queries
@@ -78,7 +89,9 @@ class BoQBlock(torch.nn.Module):
             self.delta_query_banks,
         )  # [B, K, C]
         #添加残差保持稳定
-        q = shared_q + self.delta_scale * routed_delta_q  # [B, K, C]
+        # 限制 delta 强度
+        delta_scale = self.max_delta_scale * torch.tanh(self.raw_delta_scale)
+        q = shared_q + delta_scale * routed_delta_q  # [B, K, C]
 
         # 5. query self-attention，保持原逻辑
         
@@ -95,7 +108,9 @@ class BoQBlock(torch.nn.Module):
          # 7. balance loss，防止所有样本都走同一个 bank
         aux = {
             "gate": gate,
-            "gate_logits": gate_logits,
+            "gate_logits": gate_logits.detach(),
+            "delta_scale": delta_scale.detach(),
+            "raw_delta_scale": self.raw_delta_scale.detach(),
         }
 
         return x, out, attn.detach(), aux
@@ -103,7 +118,10 @@ class BoQBlock(torch.nn.Module):
 
 
 class BoQ(torch.nn.Module):
-    def __init__(self, in_channels=1024, proj_channels=512, num_queries=32, num_layers=2, row_dim=32,use_domain_routing=True,num_query_banks=4,routing_type="delta",):
+    def __init__(self, in_channels=1024, proj_channels=512, num_queries=32, num_layers=2, row_dim=32,use_domain_routing=True,num_query_banks=4,routing_type="delta",router_temperature=0.7,
+        max_delta_scale=0.2,
+        routing_layers="last",  # "all" or "last"
+        ):
         super().__init__()
         self.use_domain_routing = use_domain_routing
         self.num_query_banks = num_query_banks
@@ -115,31 +133,40 @@ class BoQ(torch.nn.Module):
         # self.boqs = torch.nn.ModuleList([
         #     BoQBlock(in_dim, num_queries, nheads=in_dim//64) for _ in range(num_layers)])
         nheads = in_dim // 64
+        blocks = []
 
-        if use_domain_routing:
-            if routing_type == "delta":
-                block_cls = BoQBlock
+        for layer_idx in range(num_layers):
+            use_routing_this_layer = False
+
+            if use_domain_routing:
+                if routing_layers == "all":
+                    use_routing_this_layer = True
+                elif routing_layers == "last":
+                    use_routing_this_layer = layer_idx == num_layers - 1
+                else:
+                    raise ValueError(f"Unknown routing_layers: {routing_layers}")
+
+            if use_routing_this_layer:
+                blocks.append(
+                    BoQBlock(
+                        in_dim=in_dim,
+                        num_queries=num_queries,
+                        nheads=nheads,
+                        num_banks=num_query_banks,
+                        router_temperature=router_temperature,
+                        max_delta_scale=max_delta_scale,
+                    )
+                )
             else:
-                raise ValueError(f"Unsupported routing_type: {routing_type}")
+                blocks.append(
+                    BoQBlock(
+                        in_dim=in_dim,
+                        num_queries=num_queries,
+                        nheads=nheads,
+                    )
+                )
 
-            self.boqs = nn.ModuleList([
-                block_cls(
-                    in_dim=in_dim,
-                    num_queries=num_queries,
-                    nheads=nheads,
-                    num_banks=num_query_banks,
-                )
-                for _ in range(num_layers)
-            ])
-        else:
-            self.boqs = nn.ModuleList([
-                BoQBlock(
-                    in_dim=in_dim,
-                    num_queries=num_queries,
-                    nheads=nheads,
-                )
-                for _ in range(num_layers)
-            ])
+        self.boqs = torch.nn.ModuleList(blocks)
 
         
         self.fc = torch.nn.Linear(num_layers*num_queries, row_dim)

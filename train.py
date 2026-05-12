@@ -87,6 +87,9 @@ class HyperParams:
         self.num_query_banks = 4
         self.routing_balance_weight = 0.001
         self.routing_type= "delta"
+        self.router_temperature = 0.7
+        self.max_delta_scale = 0.2
+        self.routing_layers = "last"
 
         ## misc
         self.silent: bool = False            # disable console output
@@ -142,6 +145,9 @@ def train(hparams, dev_mode=False):
         use_domain_routing=hparams.use_domain_routing,
         num_query_banks=hparams.num_query_banks,
         routing_type=hparams.routing_type,
+        router_temperature=hparams.router_temperature,
+        max_delta_scale=hparams.max_delta_scale,
+        routing_layers=hparams.routing_layers,
     )
     
     # Define the entire Lightning model for training and validation
@@ -435,6 +441,9 @@ def parse_args():
     default=None,
     help="Milestones for MultiStepLR, e.g. --milestones 20 30"
     )
+    parser.add_argument("--router_temperature", type=float, default=None)
+    parser.add_argument("--max_delta_scale", type=float, default=None)
+    parser.add_argument("--routing_layers", type=str, default=None, choices=["all", "last"])
     return parser.parse_args()
 
 
@@ -492,5 +501,13 @@ if __name__ == "__main__":
         hparams.routing_balance_weight = args.routing_balance_weight
     if args.milestones is not None:
         hparams.milestones = args.milestones
+    if args.router_temperature is not None:
+        hparams.router_temperature = args.router_temperature
+
+    if args.max_delta_scale is not None:
+        hparams.max_delta_scale = args.max_delta_scale
+
+    if args.routing_layers is not None:
+        hparams.routing_layers = args.routing_layers
     
     train(hparams, dev_mode=args.dev)

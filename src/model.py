@@ -103,7 +103,7 @@ class BoQModel(L.LightningModule):
         descriptors, attentions, routing_aux = self(images)
         loss_main = self.compute_loss(descriptors, labels)
         loss = loss_main
-
+        self.log("loss/main", loss_main, prog_bar=True, logger=True)
         if routing_aux is not None and self.routing_balance_weight > 0:
             routing_loss_out = self.compute_routing_balance_loss(routing_aux)
             if routing_loss_out is not None:
@@ -113,16 +113,51 @@ class BoQModel(L.LightningModule):
                 self.log("loss/routing_balance", loss_balance, prog_bar=False, logger=True)
                 self.log("router/gate_entropy", gate_entropy, prog_bar=False, logger=True)
 
-                # 记录每层 delta_scale
-                for layer_idx, aux in enumerate(routing_aux):
+                # 记录每个 routed block 的 delta_scale
+                for routed_idx, aux in enumerate(routing_aux):
                     if "delta_scale" in aux:
+                        delta_scale = aux["delta_scale"]
+
+                        # 如果只在最后一层 routing，num_layers=2，
+                        # routed_idx=0 实际对应 layer1
+                        layer_name = "layer1" if len(routing_aux) == 1 else f"layer{routed_idx}"
+
                         self.log(
-                            f"router/layer{layer_idx}_delta_scale",
-                            aux["delta_scale"].float(),
+                            f"router/{layer_name}_delta_scale",
+                            delta_scale.float(),
                             prog_bar=False,
                             logger=True,
+                            on_step=True,
+                            on_epoch=True,
                         )
 
+                    if "raw_delta_scale" in aux:
+                        raw_delta_scale = aux["raw_delta_scale"]
+                        layer_name = "layer1" if len(routing_aux) == 1 else f"layer{routed_idx}"
+
+                        self.log(
+                            f"router/{layer_name}_raw_delta_scale",
+                            raw_delta_scale.float(),
+                            prog_bar=False,
+                            logger=True,
+                            on_step=True,
+                            on_epoch=True,
+                        )
+
+                for aux in routing_aux:
+                    layer_idx = aux.get("layer_idx", 0)
+                    gate = aux["gate"].detach()  # [B, M]
+                    mean_gate = gate.mean(dim=0) # [M]
+
+                    for bank_idx in range(mean_gate.numel()):
+                        self.log(
+                            f"router/layer{layer_idx}_bank{bank_idx}_mean_gate",
+                            mean_gate[bank_idx].float(),
+                            prog_bar=False,
+                            logger=True,
+                            on_step=False,
+                            on_epoch=True,
+                        )
         self.log("loss", loss, prog_bar=True, logger=True)
         # # ✅ 新增：记录 epoch 信息
         # self.log('train/loss', loss, on_step=True, on_epoch=True, prog_bar=True)
