@@ -335,6 +335,9 @@ def main() -> int:
     parser.add_argument("--python_bin", default=sys.executable, help="Python executable used to run train.py")
     parser.add_argument("--silent_test", action="store_true", help="Pass --silent when running train.py test_only")
     parser.add_argument("--cleanup_single_reports", action="store_true", help="Delete per-checkpoint JSON/MD reports for this version after consolidated summary is generated.")
+    parser.add_argument("--use_qtr", action="store_true")
+    parser.add_argument("--qtr_layers", type=str, default="last")
+    parser.add_argument("--qtr_hidden_dim", type=str, default="128")
     args = parser.parse_args()
 
     logs_root = Path(args.logs_root)
@@ -372,6 +375,13 @@ def main() -> int:
         ]
         if args.silent_test:
             cmd.append("--silent")
+        
+        if args.use_qtr:
+            cmd += [
+                "--use_qtr",
+                "--qtr_layers", args.qtr_layers,
+                "--qtr_hidden_dim", str(args.qtr_hidden_dim),
+            ]
 
         print(f"[BatchEval][{idx}/{len(ckpts)}] Evaluating: {ckpt.name}")
         subprocess.run(cmd, check=True)

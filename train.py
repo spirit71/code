@@ -83,13 +83,16 @@ class HyperParams:
         self.enable_early_stopping: bool = True
         self.eval_report_dir: str = "./logs/eval_reports"
         self.enable_console_file_log: bool = True  # mirror console stdout/stderr to log file 将控制台输出/错误输出镜像到日志文件中
-        self.use_domain_routing = True
+        self.use_domain_routing = False
         self.num_query_banks = 4
         self.routing_balance_weight = 0.001
         self.routing_type= "delta"
         self.router_temperature = 0.7
         self.max_delta_scale = 0.2
         self.routing_layers = "last"
+        self.use_qtr = False
+        self.qtr_layers = "last"
+        self.qtr_hidden_dim = 128
 
         ## misc
         self.silent: bool = False            # disable console output
@@ -148,6 +151,9 @@ def train(hparams, dev_mode=False):
         router_temperature=hparams.router_temperature,
         max_delta_scale=hparams.max_delta_scale,
         routing_layers=hparams.routing_layers,
+        use_qtr=hparams.use_qtr,
+        qtr_layers=hparams.qtr_layers,
+        qtr_hidden_dim=hparams.qtr_hidden_dim,
     )
     
     # Define the entire Lightning model for training and validation
@@ -444,6 +450,9 @@ def parse_args():
     parser.add_argument("--router_temperature", type=float, default=None)
     parser.add_argument("--max_delta_scale", type=float, default=None)
     parser.add_argument("--routing_layers", type=str, default=None, choices=["all", "last"])
+    parser.add_argument("--use_qtr", action="store_true")
+    parser.add_argument("--qtr_layers", type=str, default=None, choices=["all", "last"])
+    parser.add_argument("--qtr_hidden_dim", type=int, default=None)
     return parser.parse_args()
 
 
@@ -509,5 +518,13 @@ if __name__ == "__main__":
 
     if args.routing_layers is not None:
         hparams.routing_layers = args.routing_layers
+    if args.use_qtr:
+        hparams.use_qtr = True
+
+    if args.qtr_layers is not None:
+        hparams.qtr_layers = args.qtr_layers
+
+    if args.qtr_hidden_dim is not None:
+        hparams.qtr_hidden_dim = args.qtr_hidden_dim
     
     train(hparams, dev_mode=args.dev)

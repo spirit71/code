@@ -9,6 +9,106 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
+class QueryConditionedTokenRefinement(nn.Module):
+    """
+    Query-conditioned Token Refinement, QTR.
+
+    作用：
+    用 query context 判断每个 patch token 的可靠性，
+    对 token 做轻量 residual refinement。
+
+    x_refined = x + alpha * gate * delta
+    """
+
+    def __init__(
+        self,
+        dim: int = 512,
+        hidden_dim: int = 128,
+        dropout: float = 0.0,
+        alpha_init: float = 0.0,
+    ):
+        super().__init__()
+
+        self.dim = dim
+
+        # 输入是 [x, q_ctx, x*q_ctx]，所以维度是 3C
+        self.gate_mlp = nn.Sequential(
+            nn.LayerNorm(3 * dim),
+            nn.Linear(3 * dim, hidden_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, 1),
+        )
+
+        # token residual delta
+        self.delta_mlp = nn.Sequential(
+            nn.LayerNorm(dim),
+            nn.Linear(dim, dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(dim, dim),
+        )
+
+        # alpha 控制 QTR 强度，初始化为 0 最稳
+        self.alpha = nn.Parameter(torch.tensor(float(alpha_init)))
+
+    def forward(self, x, queries):
+        """
+        Args:
+            x: [B, N, C]
+            queries: [B, K, C] or [1, K, C]
+
+        Returns:
+            x_refined: [B, N, C]
+            aux: dict
+        """
+        B, N, C = x.shape
+
+        if queries.size(0) == 1:
+            queries = queries.repeat(B, 1, 1)
+
+        # query context: [B, C]
+        q_ctx = queries.mean(dim=1)
+
+        # expand to token level: [B, N, C]
+        q_ctx_expand = q_ctx.unsqueeze(1).expand(-1, N, -1)
+
+        # interaction feature
+        interaction = x * q_ctx_expand
+
+        gate_input = torch.cat(
+            [x, q_ctx_expand, interaction],
+            dim=-1,
+        )  # [B, N, 3C]
+
+        gate_logits = self.gate_mlp(gate_input)  # [B, N, 1]
+        gate = torch.sigmoid(gate_logits)        # [B, N, 1]
+
+        delta = self.delta_mlp(x)                # [B, N, C]
+
+        # 用 tanh 限制 alpha，避免过大破坏 token
+        alpha = torch.tanh(self.alpha)
+
+        x_refined = x + alpha * gate * delta
+
+        # 诊断指标
+        gate_mean = gate.mean()
+        gate_std = gate.std()
+        gate_entropy = -(
+            gate * torch.log(gate + 1e-8)
+            + (1 - gate) * torch.log(1 - gate + 1e-8)
+        ).mean()
+
+        aux = {
+            "qtr_alpha": alpha.detach(),
+            "qtr_gate_mean": gate_mean.detach(),
+            "qtr_gate_std": gate_std.detach(),
+            "qtr_gate_entropy": gate_entropy.detach(),
+        }
+
+        return x_refined, aux
+
 class BoQBlock(torch.nn.Module):
     # Shared Query + Routed Delta Query Bank.
 
@@ -27,13 +127,15 @@ class BoQBlock(torch.nn.Module):
     def __init__(self, in_dim, num_queries, nheads=8,num_banks = 4,
         router_hidden_ratio=4,
         use_balance_loss=True,delta_init_scale: float = 0.02,router_temperature=0.7, # 0.7 0.5
-        max_delta_scale=0.2,):
+        max_delta_scale=0.2,use_qtr=False,
+        qtr_hidden_dim=128,):
         super(BoQBlock, self).__init__()
         self.in_dim = in_dim
         self.num_queries = num_queries
         self.num_banks = num_banks
         self.router_temperature = router_temperature
         self.max_delta_scale = max_delta_scale
+        self.use_qtr = use_qtr
         self.encoder = torch.nn.TransformerEncoderLayer(d_model=in_dim, nhead=nheads, dim_feedforward=4*in_dim, batch_first=True, dropout=0.)
         # shared query: 对应原始 BoQ 的固定 learnable queries
         self.shared_queries = torch.nn.Parameter(
@@ -58,7 +160,12 @@ class BoQBlock(torch.nn.Module):
             torch.nn.ReLU(inplace=True),
             torch.nn.Linear(hidden_dim, num_banks),
         )
-        
+        if use_qtr:
+            self.qtr = QueryConditionedTokenRefinement(
+                dim=in_dim,
+                hidden_dim=qtr_hidden_dim,
+                alpha_init=0.0,
+            )
         # the following two lines are used during training only, you can cache their output in eval.
         self.self_attn = torch.nn.MultiheadAttention(in_dim, num_heads=nheads, batch_first=True)
         self.norm_q = torch.nn.LayerNorm(in_dim)
@@ -81,7 +188,7 @@ class BoQBlock(torch.nn.Module):
             dim=-1,
         )
 
-        shared_q = self.shared_queries.repeat(B, 1, 1)
+        q = self.shared_queries.repeat(B, 1, 1)
         # 4. soft routing 得到当前图像专属 queries
         routed_delta_q = torch.einsum(
             "bm,mkc->bkc",
@@ -91,7 +198,7 @@ class BoQBlock(torch.nn.Module):
         #添加残差保持稳定
         # 限制 delta 强度
         delta_scale = self.max_delta_scale * torch.tanh(self.raw_delta_scale)
-        q = shared_q + delta_scale * routed_delta_q  # [B, K, C]
+        # q = shared_q + delta_scale * routed_delta_q  # [B, K, C]
 
         # 5. query self-attention，保持原逻辑
         
@@ -99,6 +206,9 @@ class BoQBlock(torch.nn.Module):
         
         # the following two lines are used during training.
         # for stability purposes 
+        # 3. Query-conditioned Token Refinement
+        if self.use_qtr:
+            x, qtr_aux = self.qtr(x, q)
         q = q + self.self_attn(q, q, q)[0]
         q = self.norm_q(q)
         #######
@@ -106,21 +216,28 @@ class BoQBlock(torch.nn.Module):
         out, attn = self.cross_attn(q, x, x)        
         out = self.norm_out(out)
          # 7. balance loss，防止所有样本都走同一个 bank
-        aux = {
-            "gate": gate,
-            "gate_logits": gate_logits.detach(),
-            "delta_scale": delta_scale.detach(),
-            "raw_delta_scale": self.raw_delta_scale.detach(),
-        }
+        # aux = {
+        #     "gate": gate,
+        #     "gate_logits": gate_logits.detach(),
+        #     "delta_scale": delta_scale.detach(),
+        #     "raw_delta_scale": self.raw_delta_scale.detach(),
+        # }
 
-        return x, out, attn.detach(), aux
+
+        # return x, out, attn.detach(), aux
     
+        if self.use_qtr:
+            return x, out, attn.detach(), qtr_aux
 
+        return x, out, attn.detach()
 
 class BoQ(torch.nn.Module):
     def __init__(self, in_channels=1024, proj_channels=512, num_queries=32, num_layers=2, row_dim=32,use_domain_routing=True,num_query_banks=4,routing_type="delta",router_temperature=0.7,
         max_delta_scale=0.2,
         routing_layers="last",  # "all" or "last"
+        use_qtr=False,
+        qtr_layers="last",
+        qtr_hidden_dim=128,
         ):
         super().__init__()
         self.use_domain_routing = use_domain_routing
@@ -128,47 +245,70 @@ class BoQ(torch.nn.Module):
         self.routing_type = routing_type
         self.proj_c = torch.nn.Conv2d(in_channels, proj_channels, kernel_size=3, padding=1)
         self.norm_input = torch.nn.LayerNorm(proj_channels)
+        self.use_qtr = use_qtr
         
         in_dim = proj_channels
         # self.boqs = torch.nn.ModuleList([
         #     BoQBlock(in_dim, num_queries, nheads=in_dim//64) for _ in range(num_layers)])
         nheads = in_dim // 64
         blocks = []
+        
+
+        # for layer_idx in range(num_layers):
+        #     use_routing_this_layer = False
+
+        #     if use_domain_routing:
+        #         if routing_layers == "all":
+        #             use_routing_this_layer = True
+        #         elif routing_layers == "last":
+        #             use_routing_this_layer = layer_idx == num_layers - 1
+        #         else:
+        #             raise ValueError(f"Unknown routing_layers: {routing_layers}")
+
+        #     if use_routing_this_layer:
+        #         blocks.append(
+        #             BoQBlock(
+        #                 in_dim=in_dim,
+        #                 num_queries=num_queries,
+        #                 nheads=nheads,
+        #                 num_banks=num_query_banks,
+        #                 router_temperature=router_temperature,
+        #                 max_delta_scale=max_delta_scale,
+        #             )
+        #         )
+        #     else:
+        #         blocks.append(
+        #             BoQBlock(
+        #                 in_dim=in_dim,
+        #                 num_queries=num_queries,
+        #                 nheads=nheads,
+        #             )
+        #         )
 
         for layer_idx in range(num_layers):
-            use_routing_this_layer = False
+            use_qtr_this_layer = False
 
-            if use_domain_routing:
-                if routing_layers == "all":
-                    use_routing_this_layer = True
-                elif routing_layers == "last":
-                    use_routing_this_layer = layer_idx == num_layers - 1
+            if use_qtr:
+                if qtr_layers == "all":
+                    use_qtr_this_layer = True
+                elif qtr_layers == "last":
+                    use_qtr_this_layer = layer_idx == num_layers - 1
                 else:
-                    raise ValueError(f"Unknown routing_layers: {routing_layers}")
+                    raise ValueError(f"Unknown qtr_layers: {qtr_layers}")
 
-            if use_routing_this_layer:
-                blocks.append(
-                    BoQBlock(
-                        in_dim=in_dim,
-                        num_queries=num_queries,
-                        nheads=nheads,
-                        num_banks=num_query_banks,
-                        router_temperature=router_temperature,
-                        max_delta_scale=max_delta_scale,
-                    )
+            blocks.append(
+                BoQBlock(
+                    in_dim=in_dim,
+                    num_queries=num_queries,
+                    nheads=nheads,
+                    use_qtr=use_qtr_this_layer,
+                    qtr_hidden_dim=qtr_hidden_dim,
                 )
-            else:
-                blocks.append(
-                    BoQBlock(
-                        in_dim=in_dim,
-                        num_queries=num_queries,
-                        nheads=nheads,
-                    )
-                )
+            )
 
         self.boqs = torch.nn.ModuleList(blocks)
 
-        
+
         self.fc = torch.nn.Linear(num_layers*num_queries, row_dim)
         
     def forward(self, x):
@@ -180,23 +320,44 @@ class BoQ(torch.nn.Module):
         outs = []
         attns = []
         routing_aux = []
+        qtr_aux_list = []
         # for i in range(len(self.boqs)):
         #     x, out, attn = self.boqs[i](x)
         #     outs.append(out)
         #     attns.append(attn)
-        for block in self.boqs:
-            if self.use_domain_routing:
-                x, out, attn, aux = block(x)
-                routing_aux.append(aux)
+        # for block in self.boqs:
+        #     if self.use_domain_routing:
+        #         x, out, attn, aux = block(x)
+        #         routing_aux.append(aux)
+        #     else:
+        #         x, out, attn = block(x)
+        
+        for layer_idx, block in enumerate(self.boqs):
+            block_out = block(x)
+
+            if len(block_out) == 4:
+                x, out, attn, qtr_aux = block_out
+                qtr_aux["layer_idx"] = layer_idx
+                qtr_aux_list.append(qtr_aux)
             else:
-                x, out, attn = block(x)
+                x, out, attn = block_out
             outs.append(out)
             attns.append(attn)
 
         out = torch.cat(outs, dim=1)# [B, L*K, C]
+        expected_queries = self.fc.in_features
+        if out.shape[1] != expected_queries:
+            raise RuntimeError(
+                f"BoQ output query length mismatch: "
+                f"got {out.shape[1]}, expected {expected_queries}. "
+                f"num outs={len(outs)}, each out shape={[o.shape for o in outs]}"
+            )
+
         out = self.fc(out.permute(0, 2, 1))# [B, C, row_dim]
         out = out.flatten(1) # [B, C*row_dim]
         out = torch.nn.functional.normalize(out, p=2, dim=-1)
-        if self.use_domain_routing:
-            return out, attns, routing_aux
+        # if self.use_domain_routing:
+        #     return out, attns, routing_aux
+        if len(qtr_aux_list) > 0:
+            return out, attns, qtr_aux_list
         return out, attns

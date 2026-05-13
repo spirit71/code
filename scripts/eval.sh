@@ -4,9 +4,12 @@ set -euo pipefail
 # Consolidated comparison for one version (all checkpoints).
 python scripts/eval_all_checkpoints.py \
   --run_name dinov2_vitb14 \
-  --version version_19 \
+  --version version_30 \
   --backbone dinov2_vitb14 \
   --primary_k 1 \
   --report_dir ./logs/eval_reports/baseline \
   --skip_existing \
-  --cleanup_single_reports
+  --cleanup_single_reports \
+  --use_qtr \
+  --qtr_layers last \
+  --qtr_hidden_dim 128
