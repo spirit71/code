@@ -11,28 +11,19 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 class QueryConditionedTokenRefinement(nn.Module):
-    """
-    Query-conditioned Token Refinement, QTR.
-
-    作用：
-    用 query context 判断每个 patch token 的可靠性，
-    对 token 做轻量 residual refinement。
-
-    x_refined = x + alpha * gate * delta
-    """
-
     def __init__(
         self,
         dim: int = 512,
         hidden_dim: int = 128,
         dropout: float = 0.0,
         alpha_init: float = 0.0,
+        gate_mode: str = "positive",  # "sigmoid" or "positive"
     ):
         super().__init__()
 
         self.dim = dim
+        self.gate_mode = gate_mode
 
-        # 输入是 [x, q_ctx, x*q_ctx]，所以维度是 3C
         self.gate_mlp = nn.Sequential(
             nn.LayerNorm(3 * dim),
             nn.Linear(3 * dim, hidden_dim),
@@ -41,7 +32,6 @@ class QueryConditionedTokenRefinement(nn.Module):
             nn.Linear(hidden_dim, 1),
         )
 
-        # token residual delta
         self.delta_mlp = nn.Sequential(
             nn.LayerNorm(dim),
             nn.Linear(dim, dim),
@@ -50,49 +40,39 @@ class QueryConditionedTokenRefinement(nn.Module):
             nn.Linear(dim, dim),
         )
 
-        # alpha 控制 QTR 强度，初始化为 0 最稳
         self.alpha = nn.Parameter(torch.tensor(float(alpha_init)))
 
     def forward(self, x, queries):
-        """
-        Args:
-            x: [B, N, C]
-            queries: [B, K, C] or [1, K, C]
-
-        Returns:
-            x_refined: [B, N, C]
-            aux: dict
-        """
         B, N, C = x.shape
 
         if queries.size(0) == 1:
             queries = queries.repeat(B, 1, 1)
 
-        # query context: [B, C]
-        q_ctx = queries.mean(dim=1)
+        q_ctx = queries.mean(dim=1)                         # [B, C]
+        q_ctx_expand = q_ctx.unsqueeze(1).expand(-1, N, -1) # [B, N, C]
 
-        # expand to token level: [B, N, C]
-        q_ctx_expand = q_ctx.unsqueeze(1).expand(-1, N, -1)
-
-        # interaction feature
         interaction = x * q_ctx_expand
 
         gate_input = torch.cat(
             [x, q_ctx_expand, interaction],
             dim=-1,
-        )  # [B, N, 3C]
+        )
 
-        gate_logits = self.gate_mlp(gate_input)  # [B, N, 1]
-        gate = torch.sigmoid(gate_logits)        # [B, N, 1]
+        gate_logits = self.gate_mlp(gate_input)
 
-        delta = self.delta_mlp(x)                # [B, N, C]
+        if self.gate_mode == "sigmoid":
+            gate = torch.sigmoid(gate_logits)               # [0, 1]
+        elif self.gate_mode == "positive":
+            gate = 0.5 + 0.5 * torch.sigmoid(gate_logits)   # [0.5, 1]
+        else:
+            raise ValueError(f"Unknown gate_mode: {self.gate_mode}")
 
-        # 用 tanh 限制 alpha，避免过大破坏 token
+        delta = self.delta_mlp(x)
+
         alpha = torch.tanh(self.alpha)
 
         x_refined = x + alpha * gate * delta
 
-        # 诊断指标
         gate_mean = gate.mean()
         gate_std = gate.std()
         gate_entropy = -(
@@ -128,7 +108,8 @@ class BoQBlock(torch.nn.Module):
         router_hidden_ratio=4,
         use_balance_loss=True,delta_init_scale: float = 0.02,router_temperature=0.7, # 0.7 0.5
         max_delta_scale=0.2,use_qtr=False,
-        qtr_hidden_dim=128,):
+        qtr_hidden_dim=128,
+        qtr_gate_mode="positive",):
         super(BoQBlock, self).__init__()
         self.in_dim = in_dim
         self.num_queries = num_queries
@@ -165,6 +146,7 @@ class BoQBlock(torch.nn.Module):
                 dim=in_dim,
                 hidden_dim=qtr_hidden_dim,
                 alpha_init=0.0,
+                gate_mode=qtr_gate_mode,
             )
         # the following two lines are used during training only, you can cache their output in eval.
         self.self_attn = torch.nn.MultiheadAttention(in_dim, num_heads=nheads, batch_first=True)
@@ -238,6 +220,7 @@ class BoQ(torch.nn.Module):
         use_qtr=False,
         qtr_layers="last",
         qtr_hidden_dim=128,
+        qtr_gate_mode="positive",
         ):
         super().__init__()
         self.use_domain_routing = use_domain_routing

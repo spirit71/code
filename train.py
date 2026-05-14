@@ -93,6 +93,7 @@ class HyperParams:
         self.use_qtr = False
         self.qtr_layers = "last"
         self.qtr_hidden_dim = 128
+        self.qtr_gate_mode = "positive"
 
         ## misc
         self.silent: bool = False            # disable console output
@@ -154,6 +155,7 @@ def train(hparams, dev_mode=False):
         use_qtr=hparams.use_qtr,
         qtr_layers=hparams.qtr_layers,
         qtr_hidden_dim=hparams.qtr_hidden_dim,
+        qtr_gate_mode=hparams.qtr_gate_mode,
     )
     
     # Define the entire Lightning model for training and validation
@@ -453,6 +455,7 @@ def parse_args():
     parser.add_argument("--use_qtr", action="store_true")
     parser.add_argument("--qtr_layers", type=str, default=None, choices=["all", "last"])
     parser.add_argument("--qtr_hidden_dim", type=int, default=None)
+    parser.add_argument("--qtr_gate_mode", type=str, default=None, choices=["sigmoid", "positive"])
     return parser.parse_args()
 
 
@@ -526,5 +529,8 @@ if __name__ == "__main__":
 
     if args.qtr_hidden_dim is not None:
         hparams.qtr_hidden_dim = args.qtr_hidden_dim
+    
+    if args.qtr_gate_mode is not None:
+        hparams.qtr_gate_mode = args.qtr_gate_mode
     
     train(hparams, dev_mode=args.dev)
