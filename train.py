@@ -20,7 +20,7 @@ from src.boq import BoQ
 from src.model import BoQModel
 from src.dataloaders.datamodule import VPRDataModule
 from src.eval_reporting import build_eval_report, save_eval_report
-
+# 2. 创建默认超参数对象
 class HyperParams:
     def __init__(self):
         ## Backbone config:
@@ -93,7 +93,10 @@ class HyperParams:
         self.use_qtr = False
         self.qtr_layers = "last"
         self.qtr_hidden_dim = 128
-        self.qtr_gate_mode = "positive"
+        self.qtr_gate_target = 0.25
+        self.qtr_gate_loss_weight = 0.0
+        self.qtr_gate_mode = "sigmoid"
+        self.qtr_refine_mode = "delta"
 
         ## misc
         self.silent: bool = False            # disable console output
@@ -156,6 +159,7 @@ def train(hparams, dev_mode=False):
         qtr_layers=hparams.qtr_layers,
         qtr_hidden_dim=hparams.qtr_hidden_dim,
         qtr_gate_mode=hparams.qtr_gate_mode,
+        qtr_refine_mode=hparams.qtr_refine_mode,
     )
     
     # Define the entire Lightning model for training and validation
@@ -170,6 +174,8 @@ def train(hparams, dev_mode=False):
         silent=hparams.silent,
         recall_ks=hparams.recall_ks,
         routing_balance_weight=hparams.routing_balance_weight,
+        qtr_gate_target=hparams.qtr_gate_target,
+        qtr_gate_loss_weight=hparams.qtr_gate_loss_weight,
     )
     # 冻结检查函数，防止“以为冻结了但其实没冻结
     def print_trainable_parameters(model):
@@ -384,7 +390,7 @@ def train(hparams, dev_mode=False):
     finally:
         if restore_console is not None:
             restore_console()
-
+# 1. 解析命令行参数
 def parse_args():
     parser = argparse.ArgumentParser(description="Train parameters")
 
@@ -456,13 +462,17 @@ def parse_args():
     parser.add_argument("--qtr_layers", type=str, default=None, choices=["all", "last"])
     parser.add_argument("--qtr_hidden_dim", type=int, default=None)
     parser.add_argument("--qtr_gate_mode", type=str, default=None, choices=["sigmoid", "positive"])
+    parser.add_argument("--qtr_gate_target", type=float, default=None)
+    parser.add_argument("--qtr_gate_loss_weight", type=float, default=None)
+    parser.add_argument("--qtr_refine_mode", type=str, default=None, choices=["delta", "scale"])
+    parser.add_argument("--qtr_gate_init_mean", type=float, default=None)
     return parser.parse_args()
 
 
 if __name__ == "__main__":
     args = parse_args()
     hparams = HyperParams()
-    
+    # 3. 如果命令行提供了参数，则覆盖默认值
     if args.seed is not None:
         hparams.seed = args.seed
     if args.compile:
@@ -532,5 +542,14 @@ if __name__ == "__main__":
     
     if args.qtr_gate_mode is not None:
         hparams.qtr_gate_mode = args.qtr_gate_mode
+    
+    if args.qtr_gate_target is not None:
+        hparams.qtr_gate_target = args.qtr_gate_target
+
+    if args.qtr_gate_loss_weight is not None:
+        hparams.qtr_gate_loss_weight = args.qtr_gate_loss_weight
+
+    if args.qtr_refine_mode is not None:
+        hparams.qtr_refine_mode = args.qtr_refine_mode
     
     train(hparams, dev_mode=args.dev)

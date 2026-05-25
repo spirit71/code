@@ -17,12 +17,15 @@ class QueryConditionedTokenRefinement(nn.Module):
         hidden_dim: int = 128,
         dropout: float = 0.0,
         alpha_init: float = 0.0,
-        gate_mode: str = "positive",  # "sigmoid" or "positive"
+        gate_mode: str = "sigmoid",   # 推荐下一步用 sigmoid
+        refine_mode: str = "delta",   # "delta" or "scale"
+        gate_init_mean=None,
     ):
         super().__init__()
 
         self.dim = dim
         self.gate_mode = gate_mode
+        self.refine_mode = refine_mode
 
         self.gate_mlp = nn.Sequential(
             nn.LayerNorm(3 * dim),
@@ -31,14 +34,21 @@ class QueryConditionedTokenRefinement(nn.Module):
             nn.Dropout(dropout),
             nn.Linear(hidden_dim, 1),
         )
+        if gate_init_mean is not None and gate_mode == "sigmoid":
+            import math
+            bias_init = math.log(gate_init_mean / (1.0 - gate_init_mean))
+            nn.init.constant_(self.gate_mlp[-1].bias, bias_init)
 
-        self.delta_mlp = nn.Sequential(
-            nn.LayerNorm(dim),
-            nn.Linear(dim, dim),
-            nn.GELU(),
-            nn.Dropout(dropout),
-            nn.Linear(dim, dim),
-        )
+        if refine_mode == "delta":
+            self.delta_mlp = nn.Sequential(
+                nn.LayerNorm(dim),
+                nn.Linear(dim, dim),
+                nn.GELU(),
+                nn.Dropout(dropout),
+                nn.Linear(dim, dim),
+            )
+        else:
+            self.delta_mlp = None
 
         self.alpha = nn.Parameter(torch.tensor(float(alpha_init)))
 
@@ -53,38 +63,45 @@ class QueryConditionedTokenRefinement(nn.Module):
 
         interaction = x * q_ctx_expand
 
-        gate_input = torch.cat(
-            [x, q_ctx_expand, interaction],
-            dim=-1,
-        )
+        gate_input = torch.cat([x, q_ctx_expand, interaction], dim=-1)
 
         gate_logits = self.gate_mlp(gate_input)
 
         if self.gate_mode == "sigmoid":
-            gate = torch.sigmoid(gate_logits)               # [0, 1]
+            gate = torch.sigmoid(gate_logits)
         elif self.gate_mode == "positive":
-            gate = 0.5 + 0.5 * torch.sigmoid(gate_logits)   # [0.5, 1]
+            gate = 0.5 + 0.5 * torch.sigmoid(gate_logits)
         else:
             raise ValueError(f"Unknown gate_mode: {self.gate_mode}")
 
-        delta = self.delta_mlp(x)
-
         alpha = torch.tanh(self.alpha)
 
-        x_refined = x + alpha * gate * delta
+        if self.refine_mode == "delta":
+            delta = self.delta_mlp(x)
+            x_refined = x + alpha * gate * delta
+        elif self.refine_mode == "scale":
+            x_refined = x * (1.0 + alpha * gate)
+        else:
+            raise ValueError(f"Unknown refine_mode: {self.refine_mode}")
 
         gate_mean = gate.mean()
         gate_std = gate.std()
         gate_entropy = -(
             gate * torch.log(gate + 1e-8)
-            + (1 - gate) * torch.log(1 - gate + 1e-8)
+            + (1.0 - gate) * torch.log(1.0 - gate + 1e-8)
         ).mean()
+
+        gate_per_image_mean = gate.mean(dim=1).squeeze(-1)  # [B]
 
         aux = {
             "qtr_alpha": alpha.detach(),
             "qtr_gate_mean": gate_mean.detach(),
             "qtr_gate_std": gate_std.detach(),
             "qtr_gate_entropy": gate_entropy.detach(),
+            "qtr_gate_per_image_mean": gate_per_image_mean.detach(),
+
+            # 这个用于 loss，不能 detach
+            "qtr_gate_mean_for_loss": gate_mean,
         }
 
         return x_refined, aux
@@ -109,7 +126,10 @@ class BoQBlock(torch.nn.Module):
         use_balance_loss=True,delta_init_scale: float = 0.02,router_temperature=0.7, # 0.7 0.5
         max_delta_scale=0.2,use_qtr=False,
         qtr_hidden_dim=128,
-        qtr_gate_mode="positive",):
+        qtr_gate_mode="positive",
+        qtr_refine_mode="delta",
+        qtr_gate_target=0.25,
+        qtr_gate_loss_weight=0.0,):
         super(BoQBlock, self).__init__()
         self.in_dim = in_dim
         self.num_queries = num_queries
@@ -117,6 +137,9 @@ class BoQBlock(torch.nn.Module):
         self.router_temperature = router_temperature
         self.max_delta_scale = max_delta_scale
         self.use_qtr = use_qtr
+        self.qtr_refine_mode=qtr_refine_mode
+        self.qtr_gate_target=qtr_gate_target,
+        self.qtr_gate_loss_weight=qtr_gate_loss_weight,
         self.encoder = torch.nn.TransformerEncoderLayer(d_model=in_dim, nhead=nheads, dim_feedforward=4*in_dim, batch_first=True, dropout=0.)
         # shared query: 对应原始 BoQ 的固定 learnable queries
         self.shared_queries = torch.nn.Parameter(
@@ -147,6 +170,7 @@ class BoQBlock(torch.nn.Module):
                 hidden_dim=qtr_hidden_dim,
                 alpha_init=0.0,
                 gate_mode=qtr_gate_mode,
+                refine_mode=qtr_refine_mode,
             )
         # the following two lines are used during training only, you can cache their output in eval.
         self.self_attn = torch.nn.MultiheadAttention(in_dim, num_heads=nheads, batch_first=True)
@@ -221,6 +245,9 @@ class BoQ(torch.nn.Module):
         qtr_layers="last",
         qtr_hidden_dim=128,
         qtr_gate_mode="positive",
+        qtr_refine_mode="delta",
+        qtr_gate_target=0.25,
+        qtr_gate_loss_weight=0.0,
         ):
         super().__init__()
         self.use_domain_routing = use_domain_routing
@@ -229,6 +256,10 @@ class BoQ(torch.nn.Module):
         self.proj_c = torch.nn.Conv2d(in_channels, proj_channels, kernel_size=3, padding=1)
         self.norm_input = torch.nn.LayerNorm(proj_channels)
         self.use_qtr = use_qtr
+        self.qtr_refine_mode=qtr_refine_mode
+        self.qtr_gate_target=qtr_gate_target,
+        self.qtr_gate_loss_weight=qtr_gate_loss_weight,
+        
         
         in_dim = proj_channels
         # self.boqs = torch.nn.ModuleList([

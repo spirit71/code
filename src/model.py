@@ -25,8 +25,9 @@ class BoQModel(L.LightningModule):
             warmup_epochs=10,
             milestones=[10, 20],
             silent=False,
-            recall_ks=[1, 5, 10, 20] # [修改] 增加默认的 Recall K 值列表
-
+            recall_ks=[1, 5, 10, 20], # [修改] 增加默认的 Recall K 值列表
+            qtr_gate_target=0.25,
+            qtr_gate_loss_weight=0.0,
         ):
         super().__init__()
         self.backbone = backbone
@@ -46,6 +47,8 @@ class BoQModel(L.LightningModule):
         self.ms_miner = miners.MultiSimilarityMiner(epsilon=0.1)
         self.last_test_recalls = {}
         self.routing_balance_weight = routing_balance_weight
+        self.qtr_gate_target=qtr_gate_target
+        self.qtr_gate_loss_weight=qtr_gate_loss_weight
 
     def configure_optimizers(self):
         optimizer_params = [
@@ -96,70 +99,53 @@ class BoQModel(L.LightningModule):
         
     def training_step(self, batch, batch_idx):
         images, labels = batch
-        # images.shape is (P, K, C, H, W) with P: number of places, K: number of views per place
-        # labels.shape is (P, K)
-        images = images.flatten(0, 1) # P*K, C, H, W 
-        labels = labels.flatten() # P*K
-        
-        # # forward pass
-        # descriptors, attentions = self(images)
-        # # compute loss
-        # loss = self.compute_loss(descriptors, labels)
+        images = images.flatten(0, 1)
+        labels = labels.flatten()
+
         descriptors, attentions, aux = self(images)
 
-        loss = self.compute_loss(descriptors, labels)
+        loss_main = self.compute_loss(descriptors, labels)
+        loss = loss_main
 
-        self.log("loss/main", loss, prog_bar=True, logger=True)
-        self.log("loss", loss, prog_bar=True, logger=True)
+        self.log("loss/main", loss_main, prog_bar=True, logger=True)
+
+        if aux is not None and self.qtr_gate_loss_weight > 0:
+            qtr_gate_loss = self.compute_qtr_gate_loss(aux)
+
+            if qtr_gate_loss is not None:
+                loss = loss + self.qtr_gate_loss_weight * qtr_gate_loss
+
+                self.log(
+                    "loss/qtr_gate",
+                    qtr_gate_loss,
+                    prog_bar=False,
+                    logger=True,
+                    on_step=True,
+                    on_epoch=True,
+                )
 
         if aux is not None:
             for item in aux:
                 layer_idx = item.get("layer_idx", 0)
 
-                if "qtr_alpha" in item:
-                    self.log(
-                        f"qtr/layer{layer_idx}_alpha",
-                        item["qtr_alpha"].float(),
-                        prog_bar=False,
-                        logger=True,
-                        on_step=True,
-                        on_epoch=True,
-                    )
+                for key in [
+                    "qtr_alpha",
+                    "qtr_gate_mean",
+                    "qtr_gate_std",
+                    "qtr_gate_entropy",
+                ]:
+                    if key in item:
+                        self.log(
+                            f"qtr/layer{layer_idx}_{key.replace('qtr_', '')}",
+                            item[key].float(),
+                            prog_bar=False,
+                            logger=True,
+                            on_step=True,
+                            on_epoch=True,
+                        )
 
-                if "qtr_gate_mean" in item:
-                    self.log(
-                        f"qtr/layer{layer_idx}_gate_mean",
-                        item["qtr_gate_mean"].float(),
-                        prog_bar=False,
-                        logger=True,
-                        on_step=True,
-                        on_epoch=True,
-                    )
-
-                if "qtr_gate_std" in item:
-                    self.log(
-                        f"qtr/layer{layer_idx}_gate_std",
-                        item["qtr_gate_std"].float(),
-                        prog_bar=False,
-                        logger=True,
-                        on_step=True,
-                        on_epoch=True,
-                    )
-
-                if "qtr_gate_entropy" in item:
-                    self.log(
-                        f"qtr/layer{layer_idx}_gate_entropy",
-                        item["qtr_gate_entropy"].float(),
-                        prog_bar=False,
-                        logger=True,
-                        on_step=True,
-                        on_epoch=True,
-                    )
-            
-        # # ✅ 新增：记录 epoch 信息
-        # self.log('train/loss', loss, on_step=True, on_epoch=True, prog_bar=True)
-        # self.log('train/epoch', float(self.current_epoch), on_step=False, on_epoch=True, prog_bar=False)
-        return loss 
+        self.log("loss", loss, prog_bar=True, logger=True)
+        return loss
 
     def on_train_epoch_end(self):
         # reload the dataframes to shuffle in-city
@@ -367,3 +353,28 @@ class BoQModel(L.LightningModule):
             raise RuntimeError(f"Unexpected model output format: {type(out)}")
 
         return descriptors, attns, routing_aux
+
+    
+
+    def compute_qtr_gate_loss(self, aux):
+        if aux is None:
+            return None
+
+        losses = []
+
+        for item in aux:
+            if "qtr_gate_mean_for_loss" in item:
+                gate_mean = item["qtr_gate_mean_for_loss"]
+
+                target = torch.tensor(
+                    self.qtr_gate_target,
+                    device=gate_mean.device,
+                    dtype=gate_mean.dtype,
+                )
+
+                losses.append((gate_mean - target).pow(2))
+
+        if len(losses) == 0:
+            return None
+
+        return torch.stack(losses).mean()
