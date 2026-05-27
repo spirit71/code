@@ -32,17 +32,17 @@ class BoQModel(L.LightningModule):
         self.lr_mul = lr_mul
         self.weight_decay = weight_decay
         self.warmup_epochs = warmup_epochs
-        self.milestones = milestones
-        self.silent = silent # disable console output
+        self.milestones = milestones # 学习率衰减里程碑  做什么的？  为什么要衰减？  
+        self.silent = silent # disable console output 
         self.recall_ks = recall_ks
         
         # init loss function and miner
-        self.ms_loss = losses.MultiSimilarityLoss(alpha=1, beta=50, base=0.)
-        self.ms_miner = miners.MultiSimilarityMiner(epsilon=0.1)
+        self.ms_loss = losses.MultiSimilarityLoss(alpha=1, beta=50, base=0.) #具体怎么计算的？  
+        self.ms_miner = miners.MultiSimilarityMiner(epsilon=0.1) #具体怎么计算的？  
 
     def configure_optimizers(self):
         optimizer_params = [
-            {"params": self.backbone.parameters(),   "lr": self.lr, "weight_decay": self.weight_decay},
+            {"params": self.backbone.parameters(),   "lr": self.lr, "weight_decay": self.weight_decay}, 
             {"params": self.aggregator.parameters(), "lr": self.lr, "weight_decay": self.weight_decay},
         ]
         optimizer = torch.optim.AdamW(optimizer_params)
@@ -54,25 +54,25 @@ class BoQModel(L.LightningModule):
     def optimizer_step(self, epoch, batch_idx, optimizer, optimizer_closure):
         # warmup learning rate for the first `self.warmup_epochs` epochs
         if self.trainer.current_epoch < self.warmup_epochs:
-            total_warmup_steps = self.warmup_epochs * self.trainer.num_training_batches
+            total_warmup_steps = self.warmup_epochs * self.trainer.num_training_batches  #num_training_batches 每个 epoch 的迭代次数 488
             lr_scale = (self.trainer.global_step + 1) / total_warmup_steps
             lr_scale = min(1.0, lr_scale)
             for pg in optimizer.param_groups:
                 initial_lr = pg.get("initial_lr", self.lr)
                 pg["lr"] = lr_scale * initial_lr
 
-        optimizer.step(closure=optimizer_closure)
+        optimizer.step(closure=optimizer_closure) #这一步转向模型参数更新，跳转到    def forward(self, x):
         self.log('_LR', optimizer.param_groups[-1]['lr'], prog_bar=False, logger=True)
     
-    @torch.compiler.disable()
+    @torch.compiler.disable() #作用是什么
     def compute_loss(self, descriptors, labels):
         mined_pairs = self.ms_miner(descriptors, labels)
         loss =  self.ms_loss(descriptors, labels, mined_pairs)
         return loss
     
     def forward(self, x):
-        x = self.backbone(x)
-        x, attns = self.aggregator(x)
+        x = self.backbone(x) #[512, 768, 16, 16]
+        x, attns = self.aggregator(x) #[512, 8192]
         return x, attns
     
     def training_step(self, batch, batch_idx):
@@ -83,9 +83,9 @@ class BoQModel(L.LightningModule):
         labels = labels.flatten() # P*K
         
         # forward pass
-        descriptors, attentions = self(images)
+        descriptors, attentions = self(images)  # attentions 是注意力权重矩阵，每个元素表示对应位置的注意力权重，描述了每个查询向量对每个位置的贡献程度,怎么没用上？，这个什么意思，下一步直接跳到forward了
         # compute loss
-        loss = self.compute_loss(descriptors, labels)
+        loss = self.compute_loss(descriptors, labels) #返回的什么，class 矩阵还是？
         self.log("loss", loss, prog_bar=True, logger=True)
         return loss 
 

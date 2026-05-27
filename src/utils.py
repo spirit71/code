@@ -118,7 +118,7 @@ def display_datasets_stats(datamodule):
     config_table.add_column("Setting", justify="left", no_wrap=True)
     config_table.add_column("Value", style="green")
 
-    config_table.add_row("Iterations per epoch", str(len(datamodule.train_dataset) // datamodule.batch_size))
+    config_table.add_row("Iterations per epoch", str(len(datamodule.train_dataset) // datamodule.batch_size)) #每个 epoch 的迭代次数 一个 epoch 里，模型会更新大约 488 次参数
     config_table.add_row("Train batch size (PxK)", f"{datamodule.batch_size}x{datamodule.img_per_place}")
     config_table.add_row("Training image size", f"{datamodule.train_img_size[0]}x{datamodule.train_img_size[1]}")
     config_table.add_row("Validation image size", f"{datamodule.val_img_size[0]}x{datamodule.val_img_size[1]}")

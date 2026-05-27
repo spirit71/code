@@ -25,10 +25,10 @@ class HyperParams:
         self.unfreeze_n_blocks: int = 2              # number of blocks to unfreeze in the backbone
         
         ## BoQ config:
-        self.channel_proj: int = 512
+        self.channel_proj: int = 512 #把 backbone 输出通道投影到 512 维
         self.num_queries: int = 64
         self.num_layers: int = 2
-        self.output_dim: int = 8192
+        self.output_dim: int = 8192  #BoQ 的输出维度不是随便写死的，而是由 channel_proj × row_dim  512 × 16 = 8192
         
         ## Datasets:
         # NOTE: if you already have OpenVPRLab, you can set the path to the datasets from there
@@ -47,23 +47,23 @@ class HyperParams:
         }
         # 2. [新增] 定义测试集 (训练结束后或测试模式下运行)
         # 这里的路径需要根据你实际存放数据集的位置修改
-        self.test_sets: dict = {
-            "pitts30k-test": "/root/data/Pittsburgh/pitts30k/",
-            "msls-val":      "./data/val/msls-val",       # MSLS通常用Val作为Test
-            "nordland":      "/home/code_qy_7_28/VPR-datasets-downloader/datasets/Nordland/images",
-            "sped":          "/home/code_qy_7_28/VPR-datasets-downloader/datasets/sped/images",
-            "amstertime":    "/home/code_qy_7_28/VPR-datasets-downloader/datasets/amstertime/images",
-            "tokyo247": "/root/data/Tokyo247/images",
-            # "eynsham":       "./data/test/eynsham",
-            # "st_lucia":      "./data/test/st_lucia",
-            "svox":          "/home/code_qy_7_28/VPR-datasets-downloader/datasets/svox/images", 
-        }
+        # self.test_sets: dict = {
+        #     "pitts30k-test": "/root/data/Pittsburgh/pitts30k/",
+        #     # "msls-val":      "./data/val/msls-val",       # MSLS通常用Val作为Test
+        #     # "nordland":      "/home/code_qy_7_28/VPR-datasets-downloader/datasets/Nordland/images",
+        #     # "sped":          "/home/code_qy_7_28/VPR-datasets-downloader/datasets/sped/images",
+        #     # "amstertime":    "/home/code_qy_7_28/VPR-datasets-downloader/datasets/amstertime/images",
+        #     # "tokyo247": "/root/data/Tokyo247/images",
+        #     # "eynsham":       "./data/test/eynsham",
+        #     # "st_lucia":      "./data/test/st_lucia",
+        #     # "svox":          "/home/code_qy_7_28/VPR-datasets-downloader/datasets/svox/images", 
+        # }
         ## Metrics Config
         # 3. [新增] 定义需要计算的 Recall K 值
         # 注意：这需要传入 Model，且 Model 内部需要支持接收此参数
         self.recall_ks: list = [1, 5, 10, 20]
         ## Training config:
-        self.batch_size: int = 128           # batch size is the number of places per batch
+        self.batch_size: int = 128           # batch size is the number of places per batch  这里的 batch_size 不是图像数量，而是 place 数量，真实每个 batch 的图像数量是 128 * 4=512
         self.img_per_place: int = 4          # number of images per place
         self.max_epochs: int = 40
         self.warmup_epochs: int = 10    # number of linear warmup epochs (not iterations)
@@ -103,11 +103,13 @@ def train(hparams, dev_mode=False):
     
     # Instantiate BoQ aggregator
     aggregator = BoQ(
-        in_channels=backbone.out_channels,
-        proj_channels=hparams.channel_proj,
-        num_queries=hparams.num_queries,
-        num_layers=hparams.num_layers,
-        row_dim=hparams.output_dim//hparams.channel_proj,
+        in_channels=backbone.out_channels, # 768 BoQ 的输入通道数来自 backbone的输出通道
+        proj_channels=hparams.channel_proj,   # 512 BoQ 的投影通道数 投影作用：1. 降低计算量
+                                             # 2. 统一不同 backbone 的输出维度
+                                             # 3. 给 aggregator 一个固定的内部工作空间
+        num_queries=hparams.num_queries, # 64 BoQ 的查询向量数量
+        num_layers=hparams.num_layers, # 2 BoQ 的层数
+        row_dim=hparams.output_dim//hparams.channel_proj, # 8192//512 = 16 BoQ 的输出维度除以投影通道数得到 row_dim，即每个查询向量包含 16 个元素
     )
     
     # Define the entire Lightning model for training and validation
@@ -115,12 +117,12 @@ def train(hparams, dev_mode=False):
         backbone,
         aggregator,
         lr=hparams.lr,
-        lr_mul=hparams.lr_mul,
-        weight_decay=hparams.weight_decay,
-        warmup_epochs=hparams.warmup_epochs,
-        milestones=hparams.milestones,
-        silent=hparams.silent,
-        recall_ks=hparams.recall_ks,
+        lr_mul=hparams.lr_mul,  # 学习率倍率
+        weight_decay=hparams.weight_decay, # 权重衰减系数
+        warmup_epochs=hparams.warmup_epochs, # 预热epoch数  训练刚开始时，不直接使用完整学习率，而是从较小学习率逐渐升到目标学习率。 
+        milestones=hparams.milestones, # 学习率衰减里程碑  训练到某些 epoch 时，把学习率降低。
+        silent=hparams.silent, # 是否静默      做什么的？  为什么要静默？  
+        recall_ks=hparams.recall_ks, # 召回率k值
     )
     
     if hparams.compile:
@@ -134,7 +136,7 @@ def train(hparams, dev_mode=False):
         cities=hparams.cities,
         img_per_place=hparams.img_per_place,
         val_sets=hparams.val_sets,
-        test_sets=hparams.test_sets,
+        # test_sets=hparams.test_sets,
         train_img_size=train_img_size,
         val_img_size=val_img_size,
         batch_size=hparams.batch_size,
@@ -194,7 +196,8 @@ def train(hparams, dev_mode=False):
         callbacks=callback_list,
         max_epochs=hparams.max_epochs,
         check_val_every_n_epoch=1,
-        num_sanity_val_steps=0,
+        num_sanity_val_steps=0,  # Lightning 默认会在训练前先跑几个 validation batch，检查验证流程有没有问题。
+                                # 这里设置成 0，表示跳过 sanity check。 如果 validation_step 有 bug，会到第一个 epoch 结束才暴露，新手调试建议 2
         log_every_n_steps=10,
         fast_dev_run=dev_mode,
         enable_model_summary=not hparams.silent,

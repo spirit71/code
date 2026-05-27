@@ -53,25 +53,22 @@ class DinoV2(torch.nn.Module):
         return self.dino.patch_embed.patch_size[0]  # Assuming square patches
     
     def forward(self, x):
-        B, _, H, W = x.shape
+        B, _, H, W = x.shape  #[512, 3, 224, 224]
         # No need to compute gradients for frozen layers
         with torch.no_grad():
-            x = self.dino.prepare_tokens_with_masks(x)
+            x = self.dino.prepare_tokens_with_masks(x)  #[512, 257, 768]
             for blk in self.dino.blocks[ : -self.unfreeze_n_blocks]:
-                x = blk(x)
-
+                x = blk(x) #[512, 257, 768]
         # Last blocks are trained
         for blk in self.dino.blocks[-self.unfreeze_n_blocks : ]:
             x = blk(x)
-            
         
-        x = x[:, 1:] # remove the [CLS] token
-        
+        x = x[:, 1:] # remove the [CLS] token  这一块的输出x.shape 怎么还是[512, 257, 768]？
         # reshape the output tensor to B, C, H, W
         if self.reshape_output:
             _, _, C = x.shape # or C = self.embed_dim
-            patch_size = self.patch_size
-            x = x.permute(0, 2, 1).view(B, C, H // patch_size, W // patch_size)
+            patch_size = self.patch_size #14
+            x = x.permute(0, 2, 1).view(B, C, H // patch_size, W // patch_size) #在做什么？
         return x
     
     
