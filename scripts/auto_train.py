@@ -15,7 +15,7 @@ def get_free_vram(gpu_index=0):
 def run_training():
     """执行你的训练命令"""
     # 这里填入你之前报错的完整命令
-    cmd = "python train.py "
+    cmd = "python train.py  --bs 128   --epochs 60   --warmup 5   --milestones 20 30   --use_lopa --lopa_rank 4 --lopa_alpha 0.5 --lopa_lr_mul 1.0"
     
     print(f"\n🚀 显存充足！开始执行训练命令: \n{cmd}\n")
     # 使用 subprocess 运行，并等待其结束

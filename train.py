@@ -27,7 +27,13 @@ class HyperParams:
         self.backbone_name: str = "dinov2_vitb14"    # resnet50, dinov2_vitb14, dinov3_vitb16
         self.unfreeze_n_blocks: int = 2              # number of blocks to unfreeze in the backbone
         self.dino_weights: str | None = None         # optional torch.hub weights name for dino backbones
-        
+        self.use_lopa: bool = False                # EDTformer LoPA fine-tuning switch
+        self.lopa_rank: int = 4                    # SideAdapter hidden rank
+        self.lopa_alpha: float = 0.5               # residual scaling in SideAdapter
+        self.lopa_skip_connect: bool = True        # use residual skip inside SideAdapter
+        self.lopa_zero_init_last: bool = True     # zero-init SideAdapter d_fc2 (EDTformer-style)
+        self.lopa_lr_mul: float = 1.0             # backbone lr multiplier when LoPA is enabled
+
         ## BoQ config:
         self.channel_proj: int = 512
         self.num_queries: int = 64
@@ -112,6 +118,11 @@ def train(hparams, dev_mode=False):
             backbone_name=hparams.backbone_name,
             unfreeze_n_blocks=hparams.unfreeze_n_blocks,
             weights=hparams.dino_weights,
+            use_lopa=hparams.use_lopa,
+            lopa_rank=hparams.lopa_rank,
+            lopa_alpha=hparams.lopa_alpha,
+            lopa_skip_connect=hparams.lopa_skip_connect,
+            lopa_zero_init_last=hparams.lopa_zero_init_last,
         )
         train_img_size = (224, 224)
         val_img_size = (322, 322)
@@ -124,6 +135,11 @@ def train(hparams, dev_mode=False):
             backbone_name=hparams.backbone_name,
             unfreeze_n_blocks=hparams.unfreeze_n_blocks,
             weights=hparams.dino_weights,
+            use_lopa=hparams.use_lopa,
+            lopa_rank=hparams.lopa_rank,
+            lopa_alpha=hparams.lopa_alpha,
+            lopa_skip_connect=hparams.lopa_skip_connect,
+            lopa_zero_init_last=hparams.lopa_zero_init_last,
         )
         train_img_size = (224, 224)
         val_img_size = (336, 336)
@@ -163,11 +179,12 @@ def train(hparams, dev_mode=False):
     )
     
     # Define the entire Lightning model for training and validation
+    effective_backbone_lr_mul = hparams.lopa_lr_mul if hparams.use_lopa else hparams.lr_mul
     model = BoQModel(
         backbone,
         aggregator,
         lr=hparams.lr,
-        lr_mul=hparams.lr_mul,
+        lr_mul=effective_backbone_lr_mul,
         weight_decay=hparams.weight_decay,
         warmup_epochs=hparams.warmup_epochs,
         milestones=hparams.milestones,
@@ -196,19 +213,21 @@ def train(hparams, dev_mode=False):
         print("================================================\n")
 
 
-    def assert_backbone_frozen(backbone):
+    def assert_backbone_frozen(backbone, allow_adapters=False):
         for name, param in backbone.named_parameters():
-            if param.requires_grad:
+            if allow_adapters and name.startswith("adapters."):
+                continue
+            if name.startswith("dino.") and param.requires_grad:
                 raise RuntimeError(
-                    f"Backbone is not fully frozen! Trainable parameter found: {name}"
+                    f"Backbone transformer is not fully frozen! Trainable parameter found: {name}"
                 )
-        print("[OK] Backbone is fully frozen. Only aggregator should be trainable.")
+        print("[OK] Backbone transformer weights are frozen.")
     
     if hparams.compile:
         model = torch.compile(model)
     
-    if "dinov3" in hparams.backbone_name and hparams.unfreeze_n_blocks == 0:
-        assert_backbone_frozen(backbone)
+    if ("dinov2" in hparams.backbone_name or "dinov3" in hparams.backbone_name) and hparams.unfreeze_n_blocks == 0:
+        assert_backbone_frozen(backbone, allow_adapters=hparams.use_lopa)
 
     print_trainable_parameters(model)
     
@@ -411,6 +430,12 @@ def parse_args():
     parser.add_argument('--backbone',   type=str, help='Backbone model name [resnet50, dinov2_vitb14, dinov3_vitb16]')
     parser.add_argument('--dino_weights', type=str, default=None, help='Optional torch.hub weights argument for dino backbones.')
     parser.add_argument('--unfreeze_n', type=int, help='Number of blocks to unfreeze in the backbone.')
+    parser.add_argument("--use_lopa", action="store_true", help="Enable EDTformer LoPA (Low-rank Parallel Adaptation).")
+    parser.add_argument("--lopa_rank", type=int, default=None, help="LoPA side-adapter hidden rank.")
+    parser.add_argument("--lopa_alpha", type=float, default=None, help="LoPA side-adapter residual scaling alpha.")
+    parser.add_argument("--lopa_no_skip", action="store_true", help="Disable residual skip inside LoPA SideAdapter.")
+    parser.add_argument("--lopa_no_zero_init", action="store_true", help="Disable zero initialization of SideAdapter d_fc2.")
+    parser.add_argument("--lopa_lr_mul", type=float, default=None, help="Backbone lr multiplier used when LoPA is enabled.")
     parser.add_argument("--dim",        type=int, help="Output dimensionality.")
     parser.add_argument("--monitor", type=str, default=None, help="Metric name to monitor for checkpoint/early stop, e.g. pitts30k-val/R@1")
     parser.add_argument("--es_patience", type=int, default=None, help="Early stop patience in epochs with no Top-1 improvement.")
@@ -495,6 +520,18 @@ if __name__ == "__main__":
         hparams.backbone_name = args.backbone
     if args.unfreeze_n is not None:
         hparams.unfreeze_n_blocks = args.unfreeze_n
+    if args.use_lopa:
+        hparams.use_lopa = True
+    if args.lopa_rank is not None:
+        hparams.lopa_rank = args.lopa_rank
+    if args.lopa_alpha is not None:
+        hparams.lopa_alpha = args.lopa_alpha
+    if args.lopa_no_skip:
+        hparams.lopa_skip_connect = False
+    if args.lopa_no_zero_init:
+        hparams.lopa_zero_init_last = False
+    if args.lopa_lr_mul is not None:
+        hparams.lopa_lr_mul = args.lopa_lr_mul
     if args.dim is not None:
         hparams.output_dim = args.dim
     if args.dino_weights:
@@ -511,7 +548,7 @@ if __name__ == "__main__":
         hparams.eval_report_dir = args.eval_report_dir
     if args.no_console_file_log:
         hparams.enable_console_file_log = False
-    if args.use_domain_routing is not None:
+    if args.use_domain_routing:
         hparams.use_domain_routing = True
 
     if args.num_query_banks is not None:

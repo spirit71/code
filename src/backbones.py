@@ -12,6 +12,39 @@ import torchvision
 from pathlib import Path
 
 
+class SideAdapter(nn.Module):
+    """LoPA side adapter used in EDTformer."""
+
+    def __init__(
+        self,
+        d_features,
+        d_hidden_features=4,
+        act_layer=nn.GELU,
+        skip_connect=True,
+        alpha=0.5,
+        init_zero=True,
+    ):
+        super().__init__()
+        self.skip_connect = skip_connect
+        self.act = act_layer()
+        self.d_fc1 = nn.Linear(d_features, d_hidden_features)
+        self.d_fc2 = nn.Linear(d_hidden_features, d_features)
+        self.alpha = alpha
+        self.init_zero = init_zero
+        if self.init_zero:
+            nn.init.constant_(self.d_fc2.weight, 0.0)
+            if self.d_fc2.bias is not None:
+                nn.init.constant_(self.d_fc2.bias, 0.0)
+
+    def forward(self, x):
+        xs = self.d_fc1(x)
+        xs = self.act(xs)
+        xs = self.d_fc2(xs)
+        if self.skip_connect:
+            return x + self.alpha * xs
+        return xs
+
+
 class _DinoBackbone(torch.nn.Module):
     """Shared loader/wrapper for DINO-family ViT backbones from torch.hub."""
 
@@ -25,6 +58,11 @@ class _DinoBackbone(torch.nn.Module):
         unfreeze_n_blocks=2,
         reshape_output=True,
         weights=None,
+        use_lopa=False,
+        lopa_rank=4,
+        lopa_alpha=0.5,
+        lopa_skip_connect=True,
+        lopa_zero_init_last=True,
     ):
         super().__init__()
 
@@ -32,6 +70,11 @@ class _DinoBackbone(torch.nn.Module):
         self.unfreeze_n_blocks = unfreeze_n_blocks
         self.reshape_output = reshape_output
         self.weights = weights
+        self.use_lopa = use_lopa
+        self.lopa_rank = lopa_rank
+        self.lopa_alpha = lopa_alpha
+        self.lopa_skip_connect = lopa_skip_connect
+        self.lopa_zero_init_last = lopa_zero_init_last
 
         # Make sure the backbone_name is in the available models.
         if self.backbone_name not in self.AVAILABLE_MODELS:
@@ -67,11 +110,34 @@ class _DinoBackbone(torch.nn.Module):
                 f"unfreeze_n_blocks must be between 0 and {total_blocks}, got {unfreeze_n_blocks}."
             )
 
-        # Unfreeze the last few blocks.
-        if unfreeze_n_blocks > 0:
-            for block in self.dino.blocks[-unfreeze_n_blocks:]:
-                for param in block.parameters():
-                    param.requires_grad = True
+        self.adapters = None
+        if self.use_lopa:
+            if self.lopa_rank <= 0:
+                raise ValueError(f"lopa_rank must be > 0 when use_lopa=True, got {self.lopa_rank}.")
+            if self.unfreeze_n_blocks > 0:
+                print(
+                    f"[Backbone] use_lopa=True, overriding unfreeze_n_blocks={self.unfreeze_n_blocks} to 0 "
+                    "to match LoPA fine-tuning (frozen backbone + trainable side adapters)."
+                )
+                self.unfreeze_n_blocks = 0
+            self.adapters = nn.ModuleList(
+                [
+                    SideAdapter(
+                        d_features=self.dino.embed_dim,
+                        d_hidden_features=self.lopa_rank,
+                        alpha=self.lopa_alpha,
+                        skip_connect=self.lopa_skip_connect,
+                        init_zero=self.lopa_zero_init_last,
+                    )
+                    for _ in range(total_blocks)
+                ]
+            )
+        else:
+            # Unfreeze the last few blocks.
+            if unfreeze_n_blocks > 0:
+                for block in self.dino.blocks[-unfreeze_n_blocks:]:
+                    for param in block.parameters():
+                        param.requires_grad = True
 
         self.out_channels = self.dino.embed_dim
 
@@ -136,33 +202,44 @@ class _DinoBackbone(torch.nn.Module):
             return patch_size[0]
         return patch_size
 
+    def _run_block(self, blk, x, rope_sincos):
+        if rope_sincos is not None:
+            return blk(x, rope_sincos)
+        return blk(x)
+
     def forward(self, x):
         B, _, H, W = x.shape
-        # No need to compute gradients for frozen layers.
         rope_sincos = None
+
         with torch.no_grad():
             tokens_out = self.dino.prepare_tokens_with_masks(x)
-            if isinstance(tokens_out, tuple):
-                x, hw_tuple = tokens_out
-                if hasattr(self.dino, "rope_embed") and self.dino.rope_embed is not None:
-                    rope_sincos = self.dino.rope_embed(H=hw_tuple[0], W=hw_tuple[1])
-            else:
-                x = tokens_out
+        if isinstance(tokens_out, tuple):
+            x, hw_tuple = tokens_out
+            if hasattr(self.dino, "rope_embed") and self.dino.rope_embed is not None:
+                rope_sincos = self.dino.rope_embed(H=hw_tuple[0], W=hw_tuple[1])
+        else:
+            x = tokens_out
 
-            frozen_until = len(self.dino.blocks) - self.unfreeze_n_blocks
-            for blk in self.dino.blocks[:frozen_until]:
-                if rope_sincos is not None:
-                    x = blk(x, rope_sincos)
-                else:
-                    x = blk(x)
+        if self.use_lopa:
+            # LoPA (as in EDTformer):
+            # y = adapter(y + blk(x)); x = y
+            y = x.clone()
+            for index, blk in enumerate(self.dino.blocks):
+                with torch.no_grad():
+                    x = self._run_block(blk, x, rope_sincos)
+                y = self.adapters[index](y + x)
+                x = y
+        else:
+            # Frozen blocks are run without grad.
+            with torch.no_grad():
+                frozen_until = len(self.dino.blocks) - self.unfreeze_n_blocks
+                for blk in self.dino.blocks[:frozen_until]:
+                    x = self._run_block(blk, x, rope_sincos)
 
-        # Last blocks are trained.
-        if self.unfreeze_n_blocks > 0:
-            for blk in self.dino.blocks[-self.unfreeze_n_blocks:]:
-                if rope_sincos is not None:
-                    x = blk(x, rope_sincos)
-                else:
-                    x = blk(x)
+            # Last blocks are trainable.
+            if self.unfreeze_n_blocks > 0:
+                for blk in self.dino.blocks[-self.unfreeze_n_blocks:]:
+                    x = self._run_block(blk, x, rope_sincos)
 
         # Remove CLS + optional storage tokens before spatial reshape.
         num_prefix_tokens = 1 + int(getattr(self.dino, "n_storage_tokens", 0))
@@ -196,12 +273,22 @@ class DinoV2(_DinoBackbone):
         unfreeze_n_blocks=2,
         reshape_output=True,
         weights=None,
+        use_lopa=False,
+        lopa_rank=4,
+        lopa_alpha=0.5,
+        lopa_skip_connect=True,
+        lopa_zero_init_last=True,
     ):
         super().__init__(
             backbone_name=backbone_name,
             unfreeze_n_blocks=unfreeze_n_blocks,
             reshape_output=reshape_output,
             weights=weights,
+            use_lopa=use_lopa,
+            lopa_rank=lopa_rank,
+            lopa_alpha=lopa_alpha,
+            lopa_skip_connect=lopa_skip_connect,
+            lopa_zero_init_last=lopa_zero_init_last,
         )
 
 
@@ -225,6 +312,11 @@ class DinoV3(_DinoBackbone):
         unfreeze_n_blocks=2,
         reshape_output=True,
         weights=None,
+        use_lopa=False,
+        lopa_rank=4,
+        lopa_alpha=0.5,
+        lopa_skip_connect=True,
+        lopa_zero_init_last=True,
     ):
         if weights is None and Path(self.DEFAULT_LOCAL_WEIGHTS).is_file():
             weights = self.DEFAULT_LOCAL_WEIGHTS
@@ -235,6 +327,11 @@ class DinoV3(_DinoBackbone):
             unfreeze_n_blocks=unfreeze_n_blocks,
             reshape_output=reshape_output,
             weights=weights,
+            use_lopa=use_lopa,
+            lopa_rank=lopa_rank,
+            lopa_alpha=lopa_alpha,
+            lopa_skip_connect=lopa_skip_connect,
+            lopa_zero_init_last=lopa_zero_init_last,
         )
 
 
