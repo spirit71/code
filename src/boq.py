@@ -53,9 +53,10 @@ class BoQ(torch.nn.Module):
         
         self.fc = torch.nn.Linear(num_layers*num_queries, row_dim)
         
-    def forward(self, x):
+    def forward(self, x, return_local=False):
         # reduce input dimension using 3x3 conv when using ResNet
         x = self.proj_c(x)
+        Hf, Wf = x.shape[-2:]
         x = x.flatten(2).permute(0, 2, 1)
         x = self.norm_input(x)
         
@@ -66,8 +67,16 @@ class BoQ(torch.nn.Module):
             outs.append(out)
             attns.append(attn)
 
+        x_last = x
         out = torch.cat(outs, dim=1)
         out = self.fc(out.permute(0, 2, 1))
         out = out.flatten(1)
         out = torch.nn.functional.normalize(out, p=2, dim=-1)
+        if return_local:
+            return {
+                "global": out,
+                "local": x_last,
+                "spatial_shape": (Hf, Wf),
+                "attention": attns[-1] if attns else None,
+            }
         return out, attns
