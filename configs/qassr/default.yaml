@@ -1,0 +1,26 @@
+experiment_name: qassr_v2
+seed: 42
+dataset_split: validation
+feature_layer: x2
+top_k: 50
+query_chunk: 32
+candidate_chunk: 50
+token_selection: all
+token_count: 529
+random_seed: 42
+matching: feature_only
+role_weight: 0.25
+similarity_threshold: 0.5
+spatial: none
+spatial_sigma: 0.15
+normalization: minmax
+fusion: weighted_sum
+global_weight: 0.7
+gate: all-query
+gate_thresholds:
+  global_margin_max: 0.02
+  local_margin_min: 0.02
+  entropy_max: 2.0
+  min_matches: 4
+bootstrap_samples: 10000
+warmup_queries: 5
