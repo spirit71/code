@@ -12,12 +12,16 @@ default_transform = T.Compose([
     T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
 ])
 
-# NOTE: Hard coded path to dataset folder 
-BASE_PATH = '/home/lufeng/data/VPR/datasets_vg/datasets/gsv_cities/'
+# Unified training dataset built with the official SelaVPR++ grouping protocol.
+BASE_PATH = '/root/Experiments/Selavpr/selavpr_unified_dataset/'
 
 if not Path(BASE_PATH).exists():
     raise FileNotFoundError(
-        'BASE_PATH is hardcoded, please adjust to point to gsv_cities')
+        f'Training dataset root does not exist: {BASE_PATH}')
+if not (Path(BASE_PATH) / 'Dataframes').is_dir():
+    raise FileNotFoundError(f'Missing training Dataframes directory: {BASE_PATH}Dataframes')
+if not (Path(BASE_PATH) / 'Images').is_dir():
+    raise FileNotFoundError(f'Missing training Images directory: {BASE_PATH}Images')
 
 class GSVCitiesDataset(Dataset):
     def __init__(self,
@@ -55,6 +59,20 @@ class GSVCitiesDataset(Dataset):
             named Dataframes, containing a DataFrame
             for each city in self.cities
         '''
+        missing_dataframes = [
+            city for city in self.cities
+            if not (Path(self.base_path) / 'Dataframes' / f'{city}.csv').is_file()
+        ]
+        missing_image_dirs = [
+            city for city in self.cities
+            if not (Path(self.base_path) / 'Images' / city).is_dir()
+        ]
+        if missing_dataframes or missing_image_dirs:
+            raise FileNotFoundError(
+                f'Incomplete training dataset at {self.base_path}: '
+                f'missing Dataframes={missing_dataframes}, '
+                f'missing Images={missing_image_dirs}')
+
         # read the first city dataframe
         df = pd.read_csv(self.base_path+'Dataframes/'+f'{self.cities[0]}.csv')
         df = df.sample(frac=1)  # shuffle the city dataframe

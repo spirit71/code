@@ -28,8 +28,13 @@ os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 #### Initial setup: parser, logging...
 args = parser.parse_arguments()
 start_time = datetime.now()
-args.save_dir = join("logs", args.save_dir, start_time.strftime('%Y-%m-%d_%H-%M-%S'))
-commons.setup_logging(args.save_dir)
+if args.resume and args.resume.endswith("last_model.pth"):
+    args.save_dir = os.path.dirname(os.path.abspath(args.resume))
+else:
+    args.save_dir = join("logs", args.save_dir, start_time.strftime('%Y-%m-%d_%H-%M-%S'))
+commons.setup_logging(
+    args.save_dir,
+    allow_existing=bool(args.resume and args.resume.endswith("last_model.pth")))
 commons.make_deterministic(args.seed)
 logging.info(f"Arguments: {args}")
 logging.info(f"The outputs are being saved in {args.save_dir}")
@@ -210,7 +215,7 @@ img_per_place=4
 min_img_per_place=4
 shuffle_all=False
 image_size=(224, 224)
-num_workers=4
+num_workers=args.num_workers
 cities=TRAIN_CITIES
 mean_std=IMAGENET_MEAN_STD
 random_sample_from_each_place=True
@@ -236,6 +241,10 @@ train_dataset = GSVCitiesDataset(
             min_img_per_place=min_img_per_place,
             random_sample_from_each_place=random_sample_from_each_place,
             transform=train_transform)
+logging.info(f"Training dataset root: {train_dataset.base_path}")
+logging.info(f"Training dataset shards: {len(cities)}")
+logging.info(f"Training places: {len(train_dataset)}")
+logging.info(f"Training images after filtering: {train_dataset.total_nb_images}")
 
 # Multi-Similarity Loss and Miner
 from pytorch_metric_learning import losses, miners
@@ -261,7 +270,9 @@ def loss_function(descriptors, labels):
 
 # loading training datasets
 ds = DataLoader(dataset=train_dataset, **train_loader_config)
-scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=len(ds)*3, gamma=0.5, last_epoch=-1)
+scheduler_last_epoch = start_epoch_num * len(ds) - 1 if args.resume else -1
+scheduler = torch.optim.lr_scheduler.StepLR(
+    optimizer, step_size=len(ds)*3, gamma=0.5, last_epoch=scheduler_last_epoch)
 
 # mixed precision training
 from torch.cuda.amp import GradScaler,autocast
@@ -288,6 +299,10 @@ for epoch_num in range(start_epoch_num, args.epochs_num):
             float_descriptors = model(images.to(args.device))
             float_descriptors = float_descriptors.cuda()
             loss, miner_outputs = loss_function(float_descriptors, labels)
+            if not torch.isfinite(loss):
+                raise RuntimeError(
+                    f"Non-finite training loss detected at epoch {epoch_num:02d}; "
+                    f"loss={loss.detach().float().item()}")
             del float_descriptors
         
         scaler.scale(loss).backward()
@@ -310,18 +325,23 @@ for epoch_num in range(start_epoch_num, args.epochs_num):
     recalls1, recalls_str1 = test.test(args, val_ds1, model)
     logging.info(f"Recalls on val set1 {val_ds1}: {recalls_str1}")
     
-    is_best = recalls1[0]+recalls1[1] > best_r1r5
+    current_score = recalls1[0] + recalls1[1]
+    is_best = current_score > best_r1r5
+    util.save_topk_model_checkpoint(
+        args, model, epoch_num, recalls1, current_score, top_k=25)
     
     # Save checkpoint, which contains all training parameters
+    updated_best = max(best_r1r5, current_score)
+    updated_not_improved = 0 if is_best else not_improved_num + 1
     util.save_checkpoint(args, {"epoch_num": epoch_num, "model_state_dict": model.state_dict(),
-        "optimizer_state_dict": optimizer.state_dict(), "recalls": recalls1, "best_r5": best_r1r5,
-        "not_improved_num": not_improved_num
+        "optimizer_state_dict": optimizer.state_dict(), "recalls": recalls1, "best_r5": updated_best,
+        "not_improved_num": updated_not_improved
     }, is_best, filename="last_model.pth")
     
     # If recall@1+recall@5 did not improve for "many" epochs, stop training
     if is_best:
         logging.info(f"Improved: previous best R@1+R@5 = {best_r1r5:.1f}, current R@1+R@5 = {(recalls1[0]+recalls1[1]):.1f}")
-        best_r1r5 = (recalls1[0]+recalls1[1])
+        best_r1r5 = current_score
         not_improved_num = 0
     else:
         not_improved_num += 1

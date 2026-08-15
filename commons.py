@@ -28,7 +28,8 @@ def make_deterministic(seed=0):
 
 
 def setup_logging(save_dir, console="debug",
-                  info_filename="info.log", debug_filename="debug.log"):
+                  info_filename="info.log", debug_filename="debug.log",
+                  allow_existing=False):
     """Set up logging files and console output.
     Creates one file for INFO logs and one for DEBUG logs.
     Args:
@@ -40,7 +41,7 @@ def setup_logging(save_dir, console="debug",
         info_filename (str): the name of the info file. if None, don't create info file
         debug_filename (str): the name of the debug file. if None, don't create debug file
     """
-    if os.path.exists(save_dir):
+    if os.path.exists(save_dir) and not allow_existing:
         raise FileExistsError(f"{save_dir} already exists!")
     os.makedirs(save_dir, exist_ok=True)
     # logging.Logger.manager.loggerDict.keys() to check which loggers are in use
@@ -70,4 +71,3 @@ def setup_logging(save_dir, console="debug",
     def exception_handler(type_, value, tb):
         logger.info("\n" + "".join(traceback.format_exception(type, value, tb)))
     sys.excepthook = exception_handler
-

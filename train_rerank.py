@@ -23,7 +23,7 @@ from model.sync_batchnorm import convert_model
 import warnings
 warnings.filterwarnings("ignore")
 import os
-os.environ["CUDA_VISIBLE_DEVICES"] = "1" 
+os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 
 #### Initial setup: parser, logging...
 args = parser.parse_arguments()
@@ -200,7 +200,7 @@ img_per_place=4
 min_img_per_place=4
 shuffle_all=False
 image_size=(224, 224)
-num_workers=4
+num_workers=args.num_workers
 cities=TRAIN_CITIES
 mean_std=IMAGENET_MEAN_STD
 random_sample_from_each_place=True
@@ -227,6 +227,10 @@ train_dataset = GSVCitiesDataset(
             min_img_per_place=min_img_per_place,
             random_sample_from_each_place=random_sample_from_each_place,
             transform=train_transform)
+logging.info(f"Training dataset root: {train_dataset.base_path}")
+logging.info(f"Training dataset shards: {len(cities)}")
+logging.info(f"Training places: {len(train_dataset)}")
+logging.info(f"Training images after filtering: {train_dataset.total_nb_images}")
 
 # Multi-Similarity Loss and Miner
 from pytorch_metric_learning import losses, miners
@@ -279,8 +283,8 @@ for epoch_num in range(start_epoch_num, args.epochs_num):
             float_descriptors, quant_descriptors, rerank_descriptors = model(images.to(args.device))
             quant_descriptors = quant_descriptors.cuda()
             loss, miner_outputs = loss_function(quant_descriptors, labels) # Call the loss_function we defined above. 
-            index1 = torch.randperm(len(miner_outputs[0]))[:max(int(1.0*len(miner_outputs[0])),1)] # Change 1.0 to 0.2 in this line and the next line
-            index2 = torch.randperm(len(miner_outputs[2]))[:max(int(1.0*len(miner_outputs[2])),1)] # to use only 20% of features pairs to reduce GPU memory usage.
+            index1 = torch.randperm(len(miner_outputs[0]))[:max(int(0.2*len(miner_outputs[0])),1)] # Change 1.0 to 0.2 in this line and the next line
+            index2 = torch.randperm(len(miner_outputs[2]))[:max(int(0.2*len(miner_outputs[2])),1)] # to use only 20% of features pairs to reduce GPU memory usage.
             sim_posi = torch.sum(float_descriptors[miner_outputs[0][index1]] * float_descriptors[miner_outputs[1][index1]],dim=-1)
             sim_nega = torch.sum(float_descriptors[miner_outputs[2][index2]] * float_descriptors[miner_outputs[3][index2]],dim=-1)
             bin_sim_posi = torch.sum(quant_descriptors[miner_outputs[0][index1]] * quant_descriptors[miner_outputs[1][index1]],dim=-1) / quant_descriptors.shape[-1]
@@ -308,7 +312,10 @@ for epoch_num in range(start_epoch_num, args.epochs_num):
     recalls1, recalls_str1 = test_rerank.test_rerank(args, val_ds1, model)
     logging.info(f"Recalls on val set1 {val_ds1}: {recalls_str1}")
     
-    is_best = recalls1[0]+recalls1[1] > best_r1r5
+    current_score = recalls1[0] + recalls1[1]
+    is_best = current_score > best_r1r5
+    util.save_topk_model_checkpoint(
+        args, model, epoch_num, recalls1, current_score, top_k=25)
     
     # Save checkpoint, which contains all training parameters
     util.save_checkpoint(args, {"epoch_num": epoch_num, "model_state_dict": model.state_dict(),
@@ -319,7 +326,7 @@ for epoch_num in range(start_epoch_num, args.epochs_num):
     # If recall@1+recall@5 did not improve for "many" epochs, stop training
     if is_best:
         logging.info(f"Improved: previous best R@1+R@5 = {best_r1r5:.1f}, current R@1+R@5 = {(recalls1[0]+recalls1[1]):.1f}")
-        best_r1r5 = (recalls1[0]+recalls1[1])
+        best_r1r5 = current_score
         not_improved_num = 0
     else:
         not_improved_num += 1

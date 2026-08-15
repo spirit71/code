@@ -11,15 +11,15 @@ def parse_arguments():
                         help="Number of triplets (query, pos, negs) in a batch. Each triplet consists of 12 images")
     parser.add_argument("--infer_batch_size", type=int, default=16,
                         help="Batch size for inference (caching and testing)")
-    parser.add_argument("--criterion", type=str, default='triplet', help='loss to be used',
-                        choices=["triplet", "sare_ind", "sare_joint"])
-    parser.add_argument("--margin", type=float, default=0.1,
-                        help="margin for the triplet loss")
+    # parser.add_argument("--criterion", type=str, default='triplet', help='loss to be used',
+    #                     choices=["triplet", "sare_ind", "sare_joint"])
+    # parser.add_argument("--margin", type=float, default=0.1,
+    #                     help="margin for the triplet loss")
     parser.add_argument("--epochs_num", type=int, default=25,
                         help="number of epochs to train for")
-    parser.add_argument("--patience", type=int, default=12)
+    parser.add_argument("--patience", type=int, default=25) #12
     parser.add_argument("--lr", type=float, default=0.0004, help="_")
-    parser.add_argument("--lr_crn_net", type=float, default=5e-4, help="Learning rate to finetune pretrained network when using CRN")
+    # parser.add_argument("--lr_crn_net", type=float, default=5e-4, help="Learning rate to finetune pretrained network when using CRN")
     parser.add_argument("--optim", type=str, default="adam", help="_", choices=["adam", "sgd", "adamw"])
     # parser.add_argument("--cache_refresh_rate", type=int, default=1000,
     #                     help="How often to refresh cache, in number of queries")
@@ -58,9 +58,9 @@ def parse_arguments():
                         help="only for majority voting, scale factor, the higher it is the more importance is given to agreement")
     parser.add_argument("--val_positive_dist_threshold", type=int, default=25, help="_")
     parser.add_argument("--train_positives_dist_threshold", type=int, default=10, help="_")
-    parser.add_argument('--recall_values', type=int, default=[1, 5, 10, 100], nargs="+",
+    parser.add_argument('--recall_values', type=int, default=[1, 5, 10, 20], nargs="+",
                         help="Recalls to be computed, such as R@5.")
-    parser.add_argument("--rerank_num", type=int, default=100, help="_")
+    parser.add_argument("--rerank_num", type=int, default=20, help="_")
     # Data augmentation parameters
     parser.add_argument("--brightness", type=float, default=None, help="_")
     parser.add_argument("--contrast", type=float, default=None, help="_")
