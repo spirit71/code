@@ -30,6 +30,8 @@ class GSVCitiesDataset(Dataset):
                  min_img_per_place=4,
                  random_sample_from_each_place=True,
                  transform=default_transform,
+                 # 【相对 Baseline 新增】Teacher 专用弱增强；None 表示保持 baseline 二元返回。
+                 teacher_transform=None,
                  base_path=BASE_PATH
                  ):
         super(GSVCitiesDataset, self).__init__()
@@ -42,6 +44,7 @@ class GSVCitiesDataset(Dataset):
         self.min_img_per_place = min_img_per_place
         self.random_sample_from_each_place = random_sample_from_each_place
         self.transform = transform
+        self.teacher_transform = teacher_transform
         
         # generate the dataframe contraining images metadata
         self.dataframe = self.__getdataframes()
@@ -117,12 +120,19 @@ class GSVCitiesDataset(Dataset):
             place = place[: self.img_per_place]
             
         imgs = []
+        # 【相对 Baseline 新增】Teacher 图像列表；关闭蒸馏时保持原 baseline 数据接口。
+        teacher_imgs = []
         for i, row in place.iterrows():
             img_name = self.get_img_name(row)
             img_path = self.base_path + 'Images/' + \
                 row['city_id'] + '/' + img_name
             img = self.image_loader(img_path)
 
+            # 【相对 Baseline 新增】同一原图复制出 Teacher 弱增强视图，避免 Student 强增强影响教师目标。
+            if self.teacher_transform is not None:
+                # The EMA teacher receives a weak view of the original image;
+                # the student independently receives the strong augmentation.
+                teacher_imgs.append(self.teacher_transform(img.copy()))
             if self.transform is not None:
                 img = self.transform(img)
 
@@ -132,7 +142,11 @@ class GSVCitiesDataset(Dataset):
         # in GSVCities, we return a place, which is a Tesor of K images (K=self.img_per_place)
         # this will return a Tensor of shape [K, channels, height, width]. This needs to be taken into account 
         # in the Dataloader (which will yield batches of shape [BS, K, channels, height, width])
-        return torch.stack(imgs), torch.tensor(place_id).repeat(self.img_per_place)
+        labels = torch.tensor(place_id).repeat(self.img_per_place)
+        # 【相对 Baseline 新增】三元返回：Student 强增强图、地点标签、Teacher 弱增强图。
+        if self.teacher_transform is not None:
+            return torch.stack(imgs), labels, torch.stack(teacher_imgs)
+        return torch.stack(imgs), labels
 
     def __len__(self):
         '''Denotes the total number of places (not images)'''

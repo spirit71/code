@@ -66,7 +66,8 @@ def test_rerank(args, eval_ds, model, test_method="hard_resize", pca=None):
     del all_binary_features ,database_binary_features, all_rerank_features
 
     logging.debug("Calculating recalls")
-    distances, predictions = faiss_index.search(packed_queries_features, max(args.recall_values))
+    rerank_num = max(args.rerank_num, max(args.recall_values))
+    distances, predictions = faiss_index.search(packed_queries_features,rerank_num)
 
     # Compute single image retrieval efficiency
     # total_time = 0
